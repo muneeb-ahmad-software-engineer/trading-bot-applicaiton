@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Launches the local MetaTrader 5 with the GoldGrid EA attached to an XAUUSD
+# chart, pointed at a local Rails app.
+#
+#   bin/mt5_run --token ggk_xxx --strategy 1 [--url http://127.0.0.1:3000]
+#
+# Writes an EA preset and a terminal startup file, then starts the terminal.
+# Trading stays OFF unless --allow-trading is passed: the first run should
+# connect and report without placing a single order.
+set -euo pipefail
+
+PREFIX="${MT5_WINEPREFIX:-$HOME/Library/Application Support/net.metaquotes.wine.metatrader5}"
+WINE="${MT5_WINE_BINARY:-/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine}"
+MT5DIR="${MT5_TERMINAL_DIR:-$PREFIX/drive_c/Program Files/MetaTrader 5}"
+
+URL="http://127.0.0.1:3000"; TOKEN=""; STRATEGY=""; ALLOW="false"; SYMBOL="XAUUSD"; PERIOD="M15"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --url) URL="$2"; shift 2;;
+    --token) TOKEN="$2"; shift 2;;
+    --strategy) STRATEGY="$2"; shift 2;;
+    --symbol) SYMBOL="$2"; shift 2;;
+    --allow-trading) ALLOW="true"; shift;;
+    *) echo "unknown option: $1" >&2; exit 1;;
+  esac
+done
+[ -n "$TOKEN" ] || { echo "--token is required" >&2; exit 1; }
+[ -n "$STRATEGY" ] || { echo "--strategy is required" >&2; exit 1; }
+[ -f "$MT5DIR/MQL5/Experts/GoldGrid.ex5" ] || { echo "GoldGrid.ex5 not found — run bin/mt5_compile first" >&2; exit 1; }
+
+mkdir -p "$MT5DIR/MQL5/Presets"
+cat > "$MT5DIR/MQL5/Presets/GoldGrid.set" <<EOF
+InpBaseUrl=$URL
+InpApiToken=$TOKEN
+InpStrategyId=$STRATEGY
+InpReportSeconds=10
+InpConfigSeconds=30
+InpMagicNumber=20260906
+InpSlippagePoints=20
+InpAllowTrading=$ALLOW
+EOF
+
+# The terminal reads this once at startup and attaches the expert itself, so
+# nobody has to drag anything onto a chart.
+# The [Experts] section is written only when trading is requested.
+#
+# It is not needed to make the expert *run* — an earlier version set it on that
+# theory, which was wrong; the expert runs either way and its log is merely
+# buffered for a few seconds. What it is needed for is MetaTrader's "Algo
+# Trading" master switch, which is off by default and silently blocks every
+# order the EA tries to place.
+#
+# It is written conditionally because this section shares a settings block with
+# the WebRequest whitelist, and that whitelist is painful to restore.
+if [ "$ALLOW" = "true" ]; then
+  cat > "$MT5DIR/goldgrid_start.ini" <<EOF
+[Experts]
+AllowLiveTrading=1
+Enabled=1
+
+EOF
+else
+  : > "$MT5DIR/goldgrid_start.ini"
+fi
+
+cat >> "$MT5DIR/goldgrid_start.ini" <<EOF
+[StartUp]
+Expert=GoldGrid
+Symbol=$SYMBOL
+Period=$PERIOD
+ExpertParameters=GoldGrid.set
+EOF
+
+# MetaTrader writes config/settings.ini — which holds the WebRequest whitelist —
+# only on a clean exit. Killing it loses anything changed in Options since the
+# last launch, which presents later as "URL not allowed" for a URL you know you
+# added. So refuse to kill it; ask for a real quit instead.
+if pgrep -f terminal64.exe >/dev/null 2>&1; then
+  echo "MetaTrader is already running." >&2
+  echo "Quit it from the app (Cmd-Q) so it saves its settings, then run this again." >&2
+  echo "MetaTrader will not start a second copy, so this script cannot take over." >&2
+  exit 1
+fi
+
+echo "url=$URL strategy=$STRATEGY trading=$ALLOW symbol=$SYMBOL"
+echo "starting terminal…"
+cd "$MT5DIR"
+WINEPREFIX="$PREFIX" WINEDEBUG=-all "$WINE" "$MT5DIR/terminal64.exe" \
+  /config:"C:\\Program Files\\MetaTrader 5\\goldgrid_start.ini" >/dev/null 2>&1 &
+echo "terminal pid $! — logs: $MT5DIR/MQL5/Logs/"

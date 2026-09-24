@@ -1,0 +1,30 @@
+<%
+  steps = [
+    { n: "01", title: "Create your account",
+      body: "Sign up and set up the platform that will hold your strategy configuration." },
+    { n: "02", title: "Configure your XAUUSD strategy",
+      body: "Choose direction, grid spacing, lot sizing and the risk limits your strategy must operate within." },
+    { n: "03", title: "Connect and run through MT5",
+      body: "Link your MT5 terminal. The Expert Advisor reads your configuration and places orders with your broker." }
+  ]
+%>
+<section id="how-it-works" class="section scroll-mt-16" aria-labelledby="how-heading">
+  <div class="container-page">
+    <div class="section-header">
+      <p class="eyebrow">How it works</p>
+      <h2 id="how-heading" class="heading-2 mt-2">Three steps from setup to running</h2>
+    </div>
+
+    <ol class="mt-12 grid gap-6 md:grid-cols-3">
+      <% steps.each do |step| %>
+        <li class="card">
+          <div class="card-body">
+            <span class="mono text-sm font-semibold text-primary"><%= step[:n] %></span>
+            <h3 class="heading-3 mt-3"><%= step[:title] %></h3>
+            <p class="body-sm mt-2"><%= step[:body] %></p>
+          </div>
+        </li>
+      <% end %>
+    </ol>
+  </div>
+</section>

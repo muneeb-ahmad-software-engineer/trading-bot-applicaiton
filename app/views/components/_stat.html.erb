@@ -1,0 +1,23 @@
+<%#
+  A single labelled figure.
+
+  tone: :default | :profit | :loss | :flat — controls the value colour. Uses the
+  market tokens rather than success/danger, so P/L colouring stays independent
+  of application feedback colouring.
+%>
+<%
+  tone ||= :default
+  value_class = case tone.to_sym
+                when :profit then "figure-lg figure-profit"
+                when :loss   then "figure-lg figure-loss"
+                when :flat   then "figure-lg figure-flat"
+                else "figure-lg"
+                end
+%>
+<div class="stat <%= local_assigns[:class] %>">
+  <span class="stat-label"><%= label %></span>
+  <span class="<%= value_class %>"><%= value %></span>
+  <% if local_assigns[:hint].present? %>
+    <span class="caption"><%= hint %></span>
+  <% end %>
+</div>

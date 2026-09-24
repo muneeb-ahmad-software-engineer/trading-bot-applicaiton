@@ -1,0 +1,10 @@
+<%#
+  Small status/label pill.
+  variant: :neutral | :primary | :success | :warning | :danger | :info
+%>
+<%
+  variant ||= :neutral
+%>
+<span class="badge badge-<%= variant %> <%= local_assigns[:class] %>">
+  <%= local_assigns[:label] %>
+</span>

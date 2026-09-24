@@ -1,0 +1,34 @@
+<%#
+  Card surface with optional header and footer.
+  Pass `elevated: true` for a raised surface.
+%>
+<%
+  elevated = local_assigns.fetch(:elevated, false)
+  base = elevated ? "card-elevated" : "card"
+
+  # Cards usually sit directly under the page heading, so h2 is the correct
+  # level. Pass heading_level to nest one inside an existing section — skipping
+  # a level breaks the outline screen-reader users navigate by.
+  heading_level = local_assigns.fetch(:heading_level, "h2")
+%>
+<div class="<%= base %> <%= local_assigns[:class] %>">
+  <% if local_assigns[:title].present? %>
+    <div class="card-header">
+      <div>
+        <%= content_tag heading_level, title, class: "heading-4" %>
+        <% if local_assigns[:subtitle].present? %>
+          <p class="caption mt-0.5"><%= subtitle %></p>
+        <% end %>
+      </div>
+      <%= local_assigns[:actions] %>
+    </div>
+  <% end %>
+
+  <div class="card-body">
+    <%= local_assigns[:body] %>
+  </div>
+
+  <% if local_assigns[:footer].present? %>
+    <div class="card-footer"><%= footer %></div>
+  <% end %>
+</div>

@@ -1,0 +1,42 @@
+<%
+  faqs = [
+    { q: "What is an XAUUSD grid strategy?",
+      a: "A grid strategy places orders at fixed price intervals rather than on a single entry signal. As price moves, additional levels open, forming a basket of positions managed together with a combined profit target and loss limit. Because a basket can grow as price moves against it, exposure and drawdown limits matter a great deal." },
+    { q: "What is MT5?",
+      a: "MetaTrader 5 is a trading terminal that many brokers support. It can run an Expert Advisor — a program that places and manages orders automatically according to rules it is given." },
+    { q: "Does the platform execute trades directly?",
+      a: "No. This platform stores and manages your strategy configuration. Orders are placed by the MT5 Expert Advisor running against your own broker account. The platform is the control layer, not the execution layer." },
+    { q: "Can I change my strategy settings?",
+      a: "Yes. Settings can be updated, and you can stop a strategy at any time. Changes apply to how the strategy behaves going forward; positions already open with your broker are not retroactively changed by editing a setting." },
+    { q: "Can I use the platform from mobile?",
+      a: "Yes. The interface is responsive and installable as a progressive web app, so it can be added to a phone home screen and opened like a native app. The same API will serve native mobile applications later. Monitoring and controlling a running strategy requires an internet connection." },
+    { q: "Is trading risk-free?",
+      a: "No. Trading XAUUSD involves leverage and carries a substantial risk of loss, including the loss of more than you might expect. Grid strategies can accumulate positions and increase exposure as price moves against a basket. The risk controls in this platform enforce the limits you configure — they cannot remove market risk, and they cannot protect you from gaps, slippage, spread widening, connectivity failures or broker conditions. Only trade with money you can afford to lose." }
+  ]
+%>
+<section id="faq" class="section scroll-mt-16" aria-labelledby="faq-heading">
+  <div class="container-page">
+    <div class="section-header">
+      <p class="eyebrow">FAQ</p>
+      <h2 id="faq-heading" class="heading-2 mt-2">Common questions</h2>
+    </div>
+
+    <%#
+      Native <details> elements: keyboard accessible and expandable with no
+      JavaScript, so the FAQ works even if scripts fail to load.
+    %>
+    <div class="mx-auto mt-10 max-w-3xl divide-y divide-border border-y border-border">
+      <% faqs.each do |faq| %>
+        <details class="faq group">
+          <summary class="faq-summary">
+            <span class="heading-4 pr-4"><%= faq[:q] %></span>
+            <svg class="faq-chevron" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+            </svg>
+          </summary>
+          <p class="body-sm pb-5"><%= faq[:a] %></p>
+        </details>
+      <% end %>
+    </div>
+  </div>
+</section>

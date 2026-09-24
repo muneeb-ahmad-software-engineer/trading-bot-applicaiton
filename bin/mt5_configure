@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Applies a strategy configuration and restarts the strategy.
+#
+# Configuration is immutable while a strategy runs, so this stops it, edits it
+# and starts it again. The EA re-reads configuration every 30s, so no terminal
+# restart is needed — which is what makes iterating on risk limits practical.
+#
+#   bin/mt5_configure 'max_spread_points: 1'
+#   bin/mt5_configure 'grid_levels: 5, max_positions: 2' --stopped
+cd "$(dirname "$0")/.."
+ATTRS="$1"; LEAVE_STOPPED="${2:-}"
+bin/rails runner -e development "
+s = Strategy.find(1)
+s.stop! unless s.stopped?
+s.update!($ATTRS)
+$([ "$LEAVE_STOPPED" = "--stopped" ] && echo 'nil' || echo 's.start!')
+puts \"applied: #{s.reload.attributes.slice('status','grid_spacing_points','grid_levels','max_positions','max_exposure_lots','max_spread_points','basket_take_profit','basket_stop_loss')}\"
+" 2>&1 | grep -vE "^(Loading|Running|=>)" | tail -3

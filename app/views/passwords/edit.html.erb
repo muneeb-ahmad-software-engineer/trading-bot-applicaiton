@@ -1,0 +1,26 @@
+<% content_for :title, "Set a new password · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/auth_shell",
+           locals: { title: "Set a new password" } do %>
+  <%= form_with url: password_path, method: :patch, class: "space-y-4" do |form| %>
+    <%# In the body rather than the URL, so it is filtered from logs. %>
+    <%= hidden_field_tag :token, params[:token] %>
+    <div class="field">
+      <%= form.label :password, "New password", class: "label" %>
+      <%= form.password_field :password, required: true, autofocus: true,
+            autocomplete: "new-password", class: "input", "aria-describedby": "pw_hint" %>
+      <p class="field-hint" id="pw_hint">At least 12 characters.</p>
+    </div>
+    <div class="field">
+      <%= form.label :password_confirmation, "Confirm new password", class: "label" %>
+      <%= form.password_field :password_confirmation, required: true,
+            autocomplete: "new-password", class: "input" %>
+    </div>
+
+    <%= render "components/alert", variant: :info,
+               body: "Resetting your password signs you out everywhere and revokes every API token, including any connected MT5 terminal." %>
+
+    <%= form.submit "Save new password", class: "btn btn-primary w-full" %>
+  <% end %>
+<% end %>

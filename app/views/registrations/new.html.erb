@@ -1,0 +1,46 @@
+<% content_for :title, "Create your account · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/auth_shell",
+           locals: { title: "Create your account",
+                     subtitle: "Set up the platform that will hold your strategy configuration.",
+                     aside: capture { concat "Already have an account? "; concat link_to("Log in", login_path, class: "text-primary hover:underline") } } do %>
+  <%= form_with model: @user, url: signup_path, method: :post, class: "space-y-4" do |form| %>
+    <% if @user.errors.any? %>
+      <%= render "components/alert", variant: :danger,
+                 title: "Please correct the following",
+                 body: @user.errors.full_messages.to_sentence %>
+    <% end %>
+
+    <div class="field">
+      <%= form.label :email_address, "Email address", class: "label" %>
+      <%= form.email_field :email_address, required: true, autofocus: true,
+            autocomplete: "username", class: "input", placeholder: "you@example.com",
+            "aria-invalid": @user.errors[:email_address].any? %>
+    </div>
+
+    <div class="field">
+      <%= form.label :password, "Password", class: "label" %>
+      <%= form.password_field :password, required: true,
+            autocomplete: "new-password", class: "input",
+            "aria-describedby": "password_hint",
+            "aria-invalid": @user.errors[:password].any? %>
+      <p class="field-hint" id="password_hint">
+        At least 12 characters. Length matters more than symbols — a memorable
+        passphrase is stronger than a short complex password.
+      </p>
+    </div>
+
+    <div class="field">
+      <%= form.label :password_confirmation, "Confirm password", class: "label" %>
+      <%= form.password_field :password_confirmation, required: true,
+            autocomplete: "new-password", class: "input" %>
+    </div>
+
+    <%= form.submit "Create account", class: "btn btn-primary w-full" %>
+
+    <p class="caption">
+      Trading involves risk of loss. Creating an account does not place any trades.
+    </p>
+  <% end %>
+<% end %>

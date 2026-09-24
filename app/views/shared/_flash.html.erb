@@ -1,0 +1,16 @@
+<%#
+  Flash messages. role="alert" so they are announced; alerts are errors and
+  notices are confirmations, mapped onto the design system alert variants.
+%>
+<% if flash[:alert].present? || flash[:notice].present? %>
+  <div class="container-page pt-4">
+    <% if flash[:alert].present? %>
+      <%= render "components/alert", variant: :danger, body: flash[:alert] %>
+    <% end %>
+    <% if flash[:notice].present? %>
+      <div class="<%= "mt-3" if flash[:alert].present? %>">
+        <%= render "components/alert", variant: :success, body: flash[:notice] %>
+      </div>
+    <% end %>
+  </div>
+<% end %>

@@ -1,0 +1,18 @@
+<main class="offline" role="main">
+  <div class="offline__card">
+    <p class="offline__eyebrow">No connection</p>
+    <h1 class="offline__title">You are offline</h1>
+    <p class="offline__body">
+      <%= Rails.application.config.x.product.name %> needs a live internet connection.
+      Strategy configuration, bot status, prices, positions and profit/loss are never
+      served from a cache, because out-of-date trading information is worse than none.
+    </p>
+    <p class="offline__body offline__body--muted">
+      Your strategy runs on your MT5 Expert Advisor and is unaffected by this device
+      losing connectivity. Reconnect to view and manage it again.
+    </p>
+    <button type="button" class="offline__button" onclick="window.location.reload()">
+      Try again
+    </button>
+  </div>
+</main>

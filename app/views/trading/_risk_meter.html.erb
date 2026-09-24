@@ -1,0 +1,29 @@
+<%#
+  One configured limit and how much of it is in use.
+
+  The status word is rendered, always. A meter that communicated "you are at
+  your exposure ceiling" only by turning red would be unreadable to a red-green
+  colourblind user — and that is precisely the reader who most needs to know.
+%>
+<%
+  percent = utilisation_percent(used, limit)
+  status = utilisation_status(percent)
+%>
+<div>
+  <div class="flex items-baseline justify-between gap-3">
+    <span class="stat-label"><%= label %></span>
+    <span class="figure-sm">
+      <%= used %><span class="text-text-muted"> / <%= limit %></span>
+    </span>
+  </div>
+
+  <div class="meter mt-2" role="meter" aria-valuenow="<%= percent %>" aria-valuemin="0"
+       aria-valuemax="100" aria-label="<%= label %>: <%= percent %>% used, <%= status[:label] %>">
+    <div class="meter-fill meter-fill-<%= status[:tone] %>" style="width: <%= percent %>%"></div>
+  </div>
+
+  <div class="mt-1.5 flex items-center justify-between gap-2">
+    <span class="caption text-<%= status[:tone] %>"><%= status[:label] %></span>
+    <span class="caption"><%= percent %>%</span>
+  </div>
+</div>

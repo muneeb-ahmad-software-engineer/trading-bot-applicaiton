@@ -1,0 +1,204 @@
+/*
+ * Badges, alerts and status indicators.
+ *
+ * Tinted backgrounds are derived from the semantic token with color-mix rather
+ * than being defined as extra tokens, so changing --color-danger updates the
+ * badge, the alert and the border together.
+ */
+@layer components {
+  /* --------------------------------------------------------------- Badges */
+
+  .badge {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5
+           text-xs font-medium whitespace-nowrap;
+  }
+
+  /* For badge-styled text long enough to exceed a narrow viewport. Keeps the
+     pill treatment but allows the label to wrap instead of overflowing. */
+  .badge-wrap {
+    @apply whitespace-normal rounded-lg text-left;
+  }
+
+  .badge-neutral {
+    @apply border-border text-text-secondary;
+    background-color: var(--color-surface-elevated);
+  }
+
+  .badge-primary {
+    @apply text-primary;
+    background-color: color-mix(in oklab, var(--color-primary) 14%, transparent);
+    border-color: color-mix(in oklab, var(--color-primary) 32%, transparent);
+  }
+
+  .badge-success {
+    @apply text-success;
+    background-color: color-mix(in oklab, var(--color-success) 14%, transparent);
+    border-color: color-mix(in oklab, var(--color-success) 32%, transparent);
+  }
+
+  .badge-warning {
+    @apply text-warning;
+    background-color: color-mix(in oklab, var(--color-warning) 14%, transparent);
+    border-color: color-mix(in oklab, var(--color-warning) 32%, transparent);
+  }
+
+  .badge-danger {
+    @apply text-danger;
+    background-color: color-mix(in oklab, var(--color-danger) 14%, transparent);
+    border-color: color-mix(in oklab, var(--color-danger) 32%, transparent);
+  }
+
+  .badge-info {
+    @apply text-info;
+    background-color: color-mix(in oklab, var(--color-info) 14%, transparent);
+    border-color: color-mix(in oklab, var(--color-info) 32%, transparent);
+  }
+
+  /* --------------------------------------------------------------- Alerts */
+
+  .alert {
+    @apply flex gap-3 rounded-lg border p-4 text-sm;
+  }
+
+  .alert-title {
+    @apply font-semibold text-text-primary;
+  }
+
+  .alert-body {
+    @apply text-text-secondary;
+  }
+
+  .alert-info {
+    border-color: color-mix(in oklab, var(--color-info) 30%, transparent);
+    background-color: color-mix(in oklab, var(--color-info) 10%, transparent);
+  }
+
+  .alert-success {
+    border-color: color-mix(in oklab, var(--color-success) 30%, transparent);
+    background-color: color-mix(in oklab, var(--color-success) 10%, transparent);
+  }
+
+  .alert-warning {
+    border-color: color-mix(in oklab, var(--color-warning) 30%, transparent);
+    background-color: color-mix(in oklab, var(--color-warning) 10%, transparent);
+  }
+
+  .alert-danger {
+    border-color: color-mix(in oklab, var(--color-danger) 30%, transparent);
+    background-color: color-mix(in oklab, var(--color-danger) 10%, transparent);
+  }
+
+  .alert-icon {
+    @apply mt-0.5 size-5 shrink-0;
+  }
+
+  /* ---------------------------------------------------- Status indicators */
+
+  /*
+   * A dot plus a text label, for bot/connection state. The label is never
+   * optional: colour alone is not an accessible way to convey status, so
+   * `.status-dot` is always accompanied by readable text.
+   */
+  .status {
+    @apply inline-flex items-center gap-2 text-sm font-medium;
+  }
+
+  .status-dot {
+    @apply size-2 shrink-0 rounded-full;
+  }
+
+  .status-running .status-dot {
+    background-color: var(--color-success);
+  }
+
+  .status-running {
+    @apply text-success;
+  }
+
+  .status-stopped .status-dot {
+    background-color: var(--color-text-muted);
+  }
+
+  .status-stopped {
+    @apply text-text-secondary;
+  }
+
+  .status-warning .status-dot {
+    background-color: var(--color-warning);
+  }
+
+  .status-warning {
+    @apply text-warning;
+  }
+
+  .status-error .status-dot {
+    background-color: var(--color-danger);
+  }
+
+  .status-error {
+    @apply text-danger;
+  }
+
+  /* Slow pulse for a genuinely live state. Deliberately subtle, and disabled
+     automatically under prefers-reduced-motion by the base layer. */
+  .status-live .status-dot {
+    background-color: var(--color-success);
+    animation: status-pulse 2s ease-in-out infinite;
+  }
+
+  .status-live {
+    @apply text-success;
+  }
+
+  @keyframes status-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+}
+
+@layer components {
+  /*
+   * FAQ disclosure, built on native <details>/<summary> so it is keyboard
+   * accessible and works with no JavaScript.
+   */
+  .faq-summary {
+    @apply flex cursor-pointer list-none items-center justify-between gap-4 py-5 text-left;
+  }
+
+  /* Safari renders a default triangle marker without this. */
+  .faq-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .faq-chevron {
+    @apply size-5 shrink-0 text-text-muted;
+    transition: transform var(--duration-base) ease;
+  }
+
+  .faq[open] .faq-chevron {
+    transform: rotate(180deg);
+  }
+}
+
+@layer components {
+  /*
+   * Utilisation meter: how much of a configured limit is in use.
+   *
+   * Thin mark, rounded data end, recessive track. The fill's colour is
+   * reinforcement only — every meter renders a status word beside it, because
+   * "how close am I to my exposure ceiling?" must not be answerable in colour
+   * alone.
+   */
+  .meter {
+    @apply h-1.5 w-full overflow-hidden rounded-full bg-surface-sunken;
+  }
+
+  .meter-fill {
+    @apply h-full rounded-full;
+    transition: width var(--duration-base) ease;
+  }
+
+  .meter-fill-success { background-color: var(--color-success); }
+  .meter-fill-warning { background-color: var(--color-warning); }
+  .meter-fill-danger  { background-color: var(--color-danger); }
+}

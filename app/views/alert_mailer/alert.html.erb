@@ -1,0 +1,23 @@
+<h2><%= @notification.title %></h2>
+
+<p><%= @notification.body %></p>
+
+<p><%= link_to "Open your dashboard", @url %></p>
+
+<% if @notification.severity == "critical" %>
+  <p>
+    <strong>This alert concerns a running strategy.</strong> Positions may be open
+    with your broker. Check your MT5 terminal.
+  </p>
+<% end %>
+
+<hr>
+
+<p style="font-size:12px;color:#64748B">
+  You are receiving this because notifications are enabled on your
+  <%= Rails.application.config.x.product.name %> account.
+  <%= link_to "Manage notification settings", URI.join(root_url, "/settings/notifications").to_s %>.
+  Alerts about a terminal that has stopped reporting cannot be switched off,
+  because a running strategy with no terminal is not a state you should
+  discover by accident.
+</p>

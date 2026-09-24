@@ -1,0 +1,44 @@
+/*
+ * Tables, for positions, orders and trading history.
+ *
+ * `.table-wrap` is required, not optional: trading tables are wide and must
+ * scroll inside their own container so the page body never scrolls sideways
+ * on a phone.
+ */
+@layer components {
+  .table-wrap {
+    @apply w-full overflow-x-auto rounded-card border border-border;
+  }
+
+  .table {
+    @apply w-full border-collapse text-sm;
+  }
+
+  .table thead {
+    @apply bg-surface-elevated;
+  }
+
+  .table th {
+    @apply px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide
+           whitespace-nowrap text-text-muted;
+  }
+
+  .table td {
+    @apply border-t border-border px-4 py-3 whitespace-nowrap text-text-secondary;
+  }
+
+  .table tbody tr:hover {
+    @apply bg-surface-elevated;
+  }
+
+  /* Numeric column: right-aligned and tabular so values line up digit by digit. */
+  .table .col-numeric {
+    @apply text-right tabular-nums;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Placeholder row when there is nothing to show yet. */
+  .table-empty {
+    @apply px-4 py-12 text-center text-sm text-text-muted;
+  }
+}

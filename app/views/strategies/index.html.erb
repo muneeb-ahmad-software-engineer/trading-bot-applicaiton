@@ -1,0 +1,53 @@
+<% content_for :title, "Strategies · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<% new_button = link_to "New strategy", new_strategy_path, class: "btn btn-primary" %>
+
+<%= render layout: "shared/app_shell",
+           locals: { title: "Strategies",
+                     subtitle: "Your XAUUSD grid configurations.",
+                     actions: new_button } do %>
+  <% if @strategies.any? %>
+    <div class="grid gap-4 md:grid-cols-2">
+      <% @strategies.each do |strategy| %>
+        <%= link_to strategy_path(strategy), class: "card-interactive block" do %>
+          <div class="card-body">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <h2 class="heading-4"><%= strategy.name %></h2>
+                <p class="caption mono mt-1">
+                  <%= strategy.symbol %> · <%= strategy.direction %> ·
+                  <%= strategy.category_trailing? ? "trailing" : "grid" %>
+                </p>
+              </div>
+              <%= render "strategies/status_badge", strategy: strategy %>
+            </div>
+            <%# A trailing strategy has no levels or spacing, so the card shows what
+                it does have rather than three dashes where the numbers used to be. %>
+            <dl class="mt-4 grid grid-cols-3 gap-3">
+              <% if strategy.category_trailing? %>
+                <div class="stat"><dt class="stat-label">Trail</dt><dd class="figure-sm"><%= strategy.trailing_stop_points %></dd></div>
+                <div class="stat"><dt class="stat-label">Step</dt><dd class="figure-sm"><%= strategy.trailing_step_points %></dd></div>
+              <% else %>
+                <div class="stat"><dt class="stat-label">Levels</dt><dd class="figure-sm"><%= strategy.grid_levels %></dd></div>
+                <div class="stat"><dt class="stat-label">Spacing</dt><dd class="figure-sm"><%= strategy.grid_spacing_points %></dd></div>
+              <% end %>
+              <div class="stat"><dt class="stat-label">Entry lot</dt><dd class="figure-sm"><%= strategy.initial_lot %></dd></div>
+            </dl>
+          </div>
+        <% end %>
+      <% end %>
+    </div>
+  <% else %>
+    <div class="card">
+      <div class="card-body py-16 text-center">
+        <h2 class="heading-3">No strategies yet</h2>
+        <p class="body mx-auto mt-2 max-w-md">
+          Create one to configure grid spacing, lot sizing and the risk limits it must
+          run within. Creating a strategy does not place any trades.
+        </p>
+        <div class="mt-6"><%= link_to "Create your first strategy", new_strategy_path, class: "btn btn-primary" %></div>
+      </div>
+    </div>
+  <% end %>
+<% end %>

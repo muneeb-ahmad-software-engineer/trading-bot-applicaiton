@@ -1,0 +1,100 @@
+/*
+ * Typography. Headings carry their own weight, tracking and line-height so a
+ * page never has to reassemble those three values by hand.
+ */
+@layer components {
+  .heading-display {
+    @apply text-4xl font-bold tracking-tight text-text-primary sm:text-5xl lg:text-6xl;
+    line-height: 1.08;
+  }
+
+  .heading-1 {
+    @apply text-3xl font-bold tracking-tight text-text-primary sm:text-4xl;
+    line-height: 1.15;
+  }
+
+  .heading-2 {
+    @apply text-2xl font-semibold tracking-tight text-text-primary sm:text-3xl;
+    line-height: 1.2;
+  }
+
+  .heading-3 {
+    @apply text-lg font-semibold text-text-primary sm:text-xl;
+    line-height: 1.3;
+  }
+
+  .heading-4 {
+    @apply text-base font-semibold text-text-primary;
+    line-height: 1.4;
+  }
+
+  /* Small uppercase kicker above a heading. */
+  .eyebrow {
+    @apply text-xs font-semibold uppercase tracking-[0.08em] text-primary;
+  }
+
+  .body-lg {
+    @apply text-lg text-text-secondary;
+  }
+
+  .body {
+    @apply text-base text-text-secondary;
+  }
+
+  .body-sm {
+    @apply text-sm text-text-secondary;
+  }
+
+  .label {
+    @apply block text-sm font-medium text-text-primary;
+  }
+
+  .caption {
+    @apply text-xs text-text-muted;
+  }
+
+  /*
+   * Financial figures.
+   *
+   * `tabular-nums` is not cosmetic here: proportional digits change width as
+   * they change value, so a live price or P/L figure visibly jitters and
+   * columns of numbers fail to align. Every number that can update, or that
+   * sits in a column, uses one of these.
+   */
+  .figure,
+  .figure-lg,
+  .figure-sm,
+  .figure-profit,
+  .figure-loss,
+  .figure-flat {
+    @apply tabular-nums text-text-primary;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .figure-lg {
+    @apply text-2xl font-semibold tracking-tight sm:text-3xl;
+  }
+
+  .figure-sm {
+    @apply text-sm;
+  }
+
+  /* Directional figures. Colour comes from the market tokens, never from the
+     success/danger feedback tokens. */
+  .figure-profit {
+    @apply text-profit;
+  }
+
+  .figure-loss {
+    @apply text-loss;
+  }
+
+  .figure-flat {
+    @apply text-flat;
+  }
+
+  /* Symbols, account numbers, ticket IDs — read character by character. */
+  .mono {
+    @apply font-mono tabular-nums tracking-tight;
+  }
+}

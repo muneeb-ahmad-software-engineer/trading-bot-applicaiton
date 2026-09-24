@@ -1,0 +1,8 @@
+<% content_for :title, "New strategy · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/app_shell",
+           locals: { title: "New strategy",
+                     subtitle: "Configuration is saved as a draft. Nothing trades until you start it." } do %>
+  <%= render "strategies/form", strategy: @strategy %>
+<% end %>

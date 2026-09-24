@@ -1,0 +1,18 @@
+<section class="section-tight" aria-labelledby="cta-heading">
+  <div class="container-page">
+    <div class="card-elevated">
+      <div class="card-body px-6 py-12 text-center sm:px-12">
+        <h2 id="cta-heading" class="heading-2">Set up your strategy</h2>
+        <p class="body mx-auto mt-4 max-w-xl">
+          Create an account, configure your XAUUSD grid, and decide the limits it has to
+          run within.
+        </p>
+        <div class="mt-8 flex flex-col justify-center gap-3 sm:flex-row">
+          <%= render "components/button", label: "Get Started", variant: :primary, size: :lg, href: signup_path %>
+          <%= render "components/button", label: "Log In", variant: :outline, size: :lg, href: login_path %>
+        </div>
+        <p class="caption mt-6">Trading involves risk of loss. No returns are promised.</p>
+      </div>
+    </div>
+  </div>
+</section>

@@ -1,0 +1,172 @@
+/*
+ * Authenticated application shell.
+ *
+ * A trading interface is returned to constantly and scanned quickly, so
+ * navigation is persistent rather than hidden behind a menu, and connection
+ * state is always on screen. Knowing whether your terminal is reporting is not
+ * a detail to go looking for — it is the first thing you need every time you
+ * open the app.
+ */
+@layer components {
+  .app-layout {
+    @apply min-h-dvh bg-background;
+  }
+
+  /* ------------------------------------------------------------- Sidebar */
+
+  .sidebar {
+    @apply fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-border bg-surface;
+    transition: width var(--duration-base) ease;
+  }
+
+  /* Icon-only rail. The label is hidden, never removed, so assistive
+     technology still announces every destination. */
+  .sidebar-collapsed .sidebar { @apply w-[4.5rem]; }
+  .sidebar-collapsed .sidebar-label,
+  .sidebar-collapsed .sidebar-group-label,
+  .sidebar-collapsed .sidebar-brand-text,
+  .sidebar-collapsed .sidebar-status-detail { @apply sr-only; }
+  .sidebar-collapsed .sidebar-link { @apply justify-center px-0; }
+  .sidebar-collapsed .sidebar-status { @apply items-center justify-center px-2; }
+  .sidebar-collapsed .sidebar-footer-text { @apply sr-only; }
+
+  .sidebar-brand {
+    @apply flex h-16 shrink-0 items-center gap-2.5 border-b border-border px-4
+           text-base font-semibold tracking-tight text-text-primary;
+  }
+
+  .sidebar-nav {
+    @apply flex-1 overflow-y-auto px-3 py-4;
+  }
+
+  .sidebar-group + .sidebar-group { @apply mt-6; }
+
+  .sidebar-group-label {
+    @apply px-3 pb-2 text-xs font-semibold uppercase tracking-wider text-text-muted;
+  }
+
+  .sidebar-link {
+    @apply relative flex items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium
+           text-text-secondary;
+    transition-property: color, background-color;
+    transition-duration: var(--duration-fast);
+  }
+
+  .sidebar-link:hover {
+    @apply bg-surface-elevated text-text-primary;
+  }
+
+  /* The current page. Marked with aria-current in the markup as well — the
+     colour is reinforcement, not the signal. */
+  .sidebar-link-active {
+    @apply bg-surface-elevated text-text-primary;
+  }
+
+  .sidebar-link-active::before {
+    content: "";
+    @apply absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary;
+  }
+
+  .sidebar-icon { @apply size-5 shrink-0; }
+
+  .sidebar-badge {
+    @apply ml-auto inline-flex min-w-5 items-center justify-center rounded-full
+           px-1.5 py-0.5 text-xs font-semibold;
+    background-color: color-mix(in oklab, var(--color-danger) 20%, transparent);
+    color: var(--color-danger);
+  }
+
+  .sidebar-collapsed .sidebar-badge {
+    @apply absolute right-2 top-1.5 ml-0 min-w-0 px-1 py-0 text-[10px] leading-4;
+  }
+
+  /* Connection state, pinned above the account footer so it is always in view. */
+  .sidebar-status {
+    @apply mx-3 flex flex-col gap-1 rounded-lg border border-border bg-surface-sunken px-3 py-2.5;
+  }
+
+  .sidebar-footer {
+    @apply flex items-center gap-3 border-t border-border p-3;
+  }
+
+  /* ------------------------------------------------------- Content area */
+
+  .app-content {
+    @apply flex min-h-dvh flex-col lg:pl-64;
+    transition: padding var(--duration-base) ease;
+  }
+
+  .sidebar-collapsed .app-content { @apply lg:pl-[4.5rem]; }
+
+  .app-header {
+    @apply sticky top-0 z-30 flex min-h-16 items-center gap-4 border-b border-border px-4 py-3 sm:px-6;
+    background-color: color-mix(in oklab, var(--color-background) 88%, transparent);
+    backdrop-filter: blur(12px);
+  }
+
+  .app-main {
+    @apply flex-1 px-4 py-6 sm:px-6 lg:py-8;
+    /* Room for the mobile tab bar so content is never trapped underneath it. */
+    padding-bottom: calc(5rem + env(safe-area-inset-bottom));
+  }
+
+  @media (min-width: 1024px) {
+    .app-main { @apply pb-10; }
+  }
+
+  /* ---------------------------------------------------- Mobile tab bar */
+
+  /*
+   * Bottom tabs rather than a hamburger. Installed to a phone home screen this
+   * is reachable one-handed, and it matches what people expect from an app
+   * rather than from a website.
+   */
+  .tab-bar {
+    @apply fixed inset-x-0 bottom-0 z-40 grid grid-cols-5 border-t border-border bg-surface;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .tab-link {
+    @apply flex flex-col items-center justify-center gap-1 px-1 py-2 text-[11px] font-medium
+           text-text-muted;
+    min-height: 3.25rem;
+  }
+
+  .tab-link-active { @apply text-primary; }
+
+  .tab-icon { @apply size-5 shrink-0; }
+
+  .tab-badge {
+    @apply absolute -top-0.5 right-1/4 inline-flex size-2 rounded-full;
+    background-color: var(--color-danger);
+  }
+
+  /* ------------------------------------------------------- Mobile sheet */
+
+  .sheet-backdrop {
+    @apply fixed inset-0 z-40 bg-black/60;
+  }
+
+  .sheet {
+    @apply fixed inset-x-0 bottom-0 z-50 max-h-[80dvh] overflow-y-auto rounded-t-2xl
+           border-t border-border bg-surface p-4;
+    padding-bottom: calc(1rem + env(safe-area-inset-bottom));
+  }
+
+  .sheet-handle {
+    @apply mx-auto mb-4 h-1 w-10 rounded-full bg-border-strong;
+  }
+}
+
+/*
+ * Mobile navigation is hidden from the large breakpoint up, where the sidebar
+ * takes over. Written as an explicit media query rather than `@apply lg:hidden`,
+ * which emits an unconditional display:none and hides these at every width.
+ */
+@media (min-width: 1024px) {
+  .tab-bar,
+  .sheet,
+  .sheet-backdrop {
+    display: none !important;
+  }
+}

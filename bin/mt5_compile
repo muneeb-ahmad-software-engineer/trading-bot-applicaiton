@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Compiles the GoldGrid Expert Advisor against a local MetaTrader 5 install.
+#
+# Copies mt5/ into the terminal's MQL5 tree, compiles with MetaEditor, prints
+# the log, and fails the build if the compiler reported an error.
+#
+#   bin/mt5_compile            # install sources and compile
+#   bin/mt5_compile --watch    # recompile whenever a source file changes
+#
+# macOS only for now: it drives the Wine that ships inside MetaTrader 5.app.
+# On a Linux VPS the same MetaEditor call works with the system wine.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+PREFIX="${MT5_WINEPREFIX:-$HOME/Library/Application Support/net.metaquotes.wine.metatrader5}"
+WINE="${MT5_WINE_BINARY:-/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine}"
+MT5DIR="${MT5_TERMINAL_DIR:-$PREFIX/drive_c/Program Files/MetaTrader 5}"
+EDITOR_EXE="$MT5DIR/MetaEditor64.exe"
+
+[ -x "$WINE" ] || { echo "wine not found at: $WINE" >&2; exit 1; }
+[ -f "$EDITOR_EXE" ] || { echo "MetaEditor not found at: $EDITOR_EXE" >&2; exit 1; }
+
+install_sources() {
+  mkdir -p "$MT5DIR/MQL5/Experts/Include/GoldGrid"
+  cp "$REPO/mt5/GoldGrid.mq5" "$MT5DIR/MQL5/Experts/GoldGrid.mq5"
+  cp "$REPO/mt5/Include/GoldGrid/"*.mqh "$MT5DIR/MQL5/Experts/Include/GoldGrid/"
+}
+
+compile() {
+  local log="$MT5DIR/MQL5/Experts/GoldGrid.log"
+  rm -f "$MT5DIR/MQL5/Experts/GoldGrid.ex5" "$log"
+
+  # MetaEditor's /compile: cannot handle a path containing spaces, and the
+  # terminal lives under "Program Files". Running from the MQL5 directory and
+  # passing a relative path is what makes this work at all.
+  ( cd "$MT5DIR/MQL5" && WINEPREFIX="$PREFIX" WINEDEBUG=-all \
+      "$WINE" "$EDITOR_EXE" /compile:"Experts\\GoldGrid.mq5" /log >/dev/null 2>&1 ) || true
+
+  if [ ! -f "$log" ]; then
+    echo "MetaEditor produced no log — the compile did not run." >&2
+    return 1
+  fi
+
+  # MetaEditor writes UTF-16LE with a BOM.
+  # Keep errors, warnings and the result line; drop the per-file include list
+  # and the code-generation progress counter.
+  iconv -f UTF-16LE -t UTF-8 "$log" 2>/dev/null | tr -d '\r' | sed '/^$/d' \
+    | grep -vE ': information: (including|compiling)|generating code' || true
+
+  if [ -f "$MT5DIR/MQL5/Experts/GoldGrid.ex5" ]; then
+    echo "OK  -> $MT5DIR/MQL5/Experts/GoldGrid.ex5"
+    return 0
+  fi
+
+  echo "FAILED — no GoldGrid.ex5 was produced." >&2
+  return 1
+}
+
+if [ "${1:-}" = "--watch" ]; then
+  echo "watching mt5/ — ctrl-c to stop"
+  while true; do
+    install_sources; compile || true
+    echo "--- waiting for changes ---"
+    # No fswatch dependency: poll the newest mtime in mt5/.
+    before=$(find "$REPO/mt5" -type f -exec stat -f "%m" {} \; | sort -n | tail -1)
+    while [ "$(find "$REPO/mt5" -type f -exec stat -f "%m" {} \; | sort -n | tail -1)" = "$before" ]; do sleep 1; done
+  done
+fi
+
+install_sources
+compile

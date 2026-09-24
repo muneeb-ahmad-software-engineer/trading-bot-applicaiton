@@ -1,0 +1,41 @@
+# examples:
+#   periodic_cleanup:
+#     class: CleanSoftDeletedRecordsJob
+#     queue: background
+#     args: [ 1000, { batch_size: 500 } ]
+#     schedule: every hour
+#   periodic_cleanup_with_command:
+#     command: "SoftDeletedRecord.due.delete_all"
+#     priority: 2
+#     schedule: at 5am every day
+
+production:
+  # Detects situations nothing else would notice — above all, a running strategy
+  # whose terminal has stopped reporting. Nothing arrives to trigger this when a
+  # terminal dies, so it must be checked from the outside.
+  monitor_terminals:
+    class: MonitorTerminalsJob
+    schedule: every minute
+
+  # Retention. Without it the account history table alone grows by roughly
+  # 400 GB a year at a thousand users.
+  # Brings every MT5 terminal into line with what the control plane asked for.
+  # This is the crash-recovery mechanism: a terminal that died, a VPS that
+  # rebooted and a deploy that interrupted a start are all corrected here.
+  mt5_reconcile:
+    class: Mt5::ReconcileInstancesJob
+    schedule: every minute
+
+  # One VPS, many users: terminals belonging to users with nothing running are
+  # stopped so their memory is available to users who are trading.
+  mt5_reap_idle:
+    class: Mt5::ReapIdleInstancesJob
+    schedule: every 5 minutes
+
+  prune_old_records:
+    class: PruneOldRecordsJob
+    schedule: every day at 3:20am
+
+  clear_solid_queue_finished_jobs:
+    command: "SolidQueue::Job.clear_finished_in_batches(sleep_between_batches: 0.3)"
+    schedule: every hour at minute 12

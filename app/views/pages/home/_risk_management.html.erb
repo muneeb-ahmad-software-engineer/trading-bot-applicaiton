@@ -1,0 +1,46 @@
+<%
+  # Each control states what it constrains. None of them are described as
+  # protecting against loss, because none of them do.
+  controls = [
+    { name: "Maximum positions",   body: "Cap how many positions the grid may hold open at once." },
+    { name: "Maximum exposure",    body: "Cap the total position size the strategy may accumulate." },
+    { name: "Basket stop loss",    body: "Close a basket once its combined loss reaches your limit." },
+    { name: "Drawdown protection", body: "Stop opening new positions when account drawdown reaches your threshold." },
+    { name: "Margin protection",   body: "Halt activity when your margin level falls below your threshold." },
+    { name: "Maximum spread",      body: "Skip new orders while the spread is wider than you allow." },
+    { name: "Emergency stop",      body: "Stop the strategy immediately, from any device." }
+  ]
+%>
+<section id="risk-management" class="section scroll-mt-16" aria-labelledby="risk-heading">
+  <div class="container-page">
+    <div class="section-header">
+      <p class="eyebrow">Risk management</p>
+      <h2 id="risk-heading" class="heading-2 mt-2">Limits you define, enforced automatically</h2>
+      <p class="body mt-4">
+        Grid strategies add positions as price moves against a basket. That behaviour is
+        what makes explicit limits essential rather than optional.
+      </p>
+    </div>
+
+    <div class="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <% controls.each do |control| %>
+        <div class="card">
+          <div class="card-body">
+            <h3 class="heading-4"><%= control[:name] %></h3>
+            <p class="body-sm mt-2"><%= control[:body] %></p>
+          </div>
+        </div>
+      <% end %>
+    </div>
+
+    <%#
+      Required by the brief and correct on the merits: these controls constrain
+      behaviour, they do not make trading safe.
+    %>
+    <div class="mt-8">
+      <%= render "components/alert", variant: :warning,
+                 title: "These controls limit exposure. They do not eliminate risk.",
+                 body: "Stops and thresholds act on the information available to your terminal. Gaps, slippage, widened spreads, connectivity loss and broker conditions can all result in outcomes worse than a configured limit. Losses can exceed what you expect, and you can lose money." %>
+    </div>
+  </div>
+</section>

@@ -1,0 +1,49 @@
+<% content_for :title, "Account activity · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/app_shell",
+           locals: { title: "Account activity",
+                     subtitle: "Security and strategy events on your account." } do %>
+  <% if @events.any? %>
+    <div class="table-wrap">
+      <table class="table">
+        <caption class="sr-only">Recent account activity</caption>
+        <thead>
+          <tr>
+            <th scope="col">When</th>
+            <th scope="col">Event</th>
+            <th scope="col">Source</th>
+            <th scope="col">IP address</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% @events.each do |event| %>
+            <tr>
+              <td class="figure-sm whitespace-nowrap"><%= event.occurred_at.to_fs(:long) %></td>
+              <td class="text-text-primary"><%= event.description %></td>
+              <td>
+                <%= render "components/badge",
+                           label: event.source,
+                           variant: (event.source == "api" ? :info : :neutral) %>
+              </td>
+              <td class="mono"><%= event.ip_address || "—" %></td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+    <p class="caption mt-3">
+      Showing the most recent <%= ActivityController::PER_PAGE %> events. Activity is
+      recorded automatically and cannot be edited or deleted.
+    </p>
+  <% else %>
+    <div class="card">
+      <div class="card-body py-16 text-center">
+        <h2 class="heading-3">No activity yet</h2>
+        <p class="body mx-auto mt-2 max-w-md">
+          Sign-ins, strategy changes and security events will appear here.
+        </p>
+      </div>
+    </div>
+  <% end %>
+<% end %>

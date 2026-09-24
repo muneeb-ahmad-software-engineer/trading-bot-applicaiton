@@ -1,0 +1,82 @@
+/*
+ * Navigation and page chrome.
+ */
+@layer components {
+  .navbar {
+    @apply sticky top-0 z-40 border-b border-border;
+    /* Slight translucency so content scrolling under the bar reads as depth. */
+    background-color: color-mix(in oklab, var(--color-background) 85%, transparent);
+    backdrop-filter: blur(12px);
+  }
+
+  .navbar-inner {
+    @apply mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-4 sm:px-6 lg:px-8;
+  }
+
+  .navbar-brand {
+    @apply flex items-center gap-2.5 text-base font-semibold tracking-tight text-text-primary;
+  }
+
+  .nav-link {
+    @apply rounded-md px-3 py-2 text-sm font-medium text-text-secondary;
+    transition-property: color, background-color;
+    transition-duration: var(--duration-fast);
+  }
+
+  .nav-link:hover {
+    @apply bg-surface-elevated text-text-primary;
+  }
+
+  /* Current page. Always paired with aria-current="page" in the markup. */
+  .nav-link-active {
+    @apply bg-surface-elevated text-text-primary;
+  }
+
+  /* Icon-only trigger for the mobile menu. */
+  .nav-toggle {
+    @apply inline-flex size-10 items-center justify-center rounded-md text-text-secondary md:hidden;
+  }
+
+  .nav-toggle:hover {
+    @apply bg-surface-elevated text-text-primary;
+  }
+
+  .nav-mobile {
+    @apply border-t border-border bg-surface px-4 py-3 md:hidden;
+  }
+
+  .nav-mobile .nav-link {
+    @apply block;
+  }
+
+  /* ---------------------------------------------------------- Page layout */
+
+  /* Standard horizontal gutter and max width. Every page section uses this so
+     content lines up across the whole product. */
+  .container-page {
+    @apply mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8;
+  }
+
+  /* Narrower measure for prose-heavy content such as FAQ answers. */
+  .container-prose {
+    @apply mx-auto w-full max-w-3xl px-4 sm:px-6;
+  }
+
+  /* Consistent vertical rhythm between landing page sections. */
+  .section {
+    @apply py-16 sm:py-20 lg:py-24;
+  }
+
+  .section-tight {
+    @apply py-12 sm:py-16;
+  }
+
+  .section-header {
+    @apply mx-auto max-w-2xl text-center;
+  }
+
+  /* Hairline divider between sections. */
+  .divider {
+    @apply border-t border-border;
+  }
+}

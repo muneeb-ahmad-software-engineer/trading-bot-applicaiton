@@ -1,0 +1,39 @@
+<%#
+  Button or link styled as a button.
+
+  Renders an <a> when `href:` is given and a <button> otherwise, so a navigation
+  action stays a real link (middle-click, open in new tab, screen-reader
+  semantics) instead of a button that happens to navigate.
+
+  variant: :primary | :secondary | :outline | :ghost | :danger
+  size:    :sm | :md | :lg
+  block:   full width below the sm breakpoint
+%>
+<%
+  variant ||= :primary
+  size ||= :md
+  href = local_assigns[:href]
+  block = local_assigns.fetch(:block, false)
+  type = local_assigns.fetch(:type, "button")
+  disabled = local_assigns.fetch(:disabled, false)
+
+  classes = class_names(
+    "btn",
+    "btn-#{variant}",
+    "btn-sm": size.to_sym == :sm,
+    "btn-lg": size.to_sym == :lg,
+    "btn-block": block
+  )
+  extra = local_assigns[:class]
+  classes = "#{classes} #{extra}" if extra.present?
+%>
+<% if href %>
+  <%= link_to href, class: classes, **local_assigns.fetch(:options, {}) do %>
+    <%= local_assigns[:label] %>
+  <% end %>
+<% else %>
+  <button type="<%= type %>" class="<%= classes %>" <%= "disabled" if disabled %>
+          <%= tag.attributes(local_assigns.fetch(:options, {})) %>>
+    <%= local_assigns[:label] %>
+  </button>
+<% end %>

@@ -1,0 +1,28 @@
+<%# Pending orders resting with the broker. %>
+<div class="table-wrap">
+  <table class="table">
+    <caption class="sr-only">Pending orders</caption>
+    <thead>
+      <tr>
+        <th scope="col">Ticket</th>
+        <th scope="col">Type</th>
+        <th scope="col">Level</th>
+        <th scope="col" class="col-numeric">Lots</th>
+        <th scope="col" class="col-numeric">Price</th>
+        <th scope="col">Placed</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% orders.each do |order| %>
+        <tr>
+          <td class="mono"><%= order.ticket %></td>
+          <td><%= order.order_type.humanize %></td>
+          <td class="mono"><%= order.grid_level || "—" %></td>
+          <td class="col-numeric"><%= order.volume %></td>
+          <td class="col-numeric"><%= order.price %></td>
+          <td class="figure-sm whitespace-nowrap"><%= order.placed_at.to_fs(:long) %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</div>

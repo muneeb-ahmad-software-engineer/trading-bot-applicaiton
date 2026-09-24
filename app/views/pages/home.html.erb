@@ -1,0 +1,44 @@
+<%
+  product = Rails.application.config.x.product
+  page_title = "#{product.name} — Automated XAUUSD Gold Grid Trading Platform"
+  page_description = "Configure an automated XAUUSD gold grid strategy, set the risk " \
+                     "limits it must respect, and manage it from one platform. " \
+                     "Execution runs through your own MT5 Expert Advisor and broker."
+%>
+<% content_for :title, page_title %>
+<% content_for :description, page_description %>
+
+<% content_for :head do %>
+  <link rel="canonical" href="<%= root_url %>">
+
+  <%# Open Graph / Twitter card metadata for link previews. %>
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="<%= product.name %>">
+  <meta property="og:title" content="<%= page_title %>">
+  <meta property="og:description" content="<%= page_description %>">
+  <meta property="og:url" content="<%= root_url %>">
+  <meta property="og:image" content="<%= root_url.chomp("/") %>/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="<%= product.name %> — automated XAUUSD grid trading platform">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="<%= page_title %>">
+  <meta name="twitter:description" content="<%= page_description %>">
+  <meta name="twitter:image" content="<%= root_url.chomp("/") %>/og-image.png">
+<% end %>
+
+<%= render "shared/navbar", sections: true %>
+
+<main id="main">
+  <%= render "pages/home/hero" %>
+  <%= render "pages/home/how_it_works" %>
+  <%= render "pages/home/configuration" %>
+  <%= render "pages/home/dashboard_preview" %>
+  <%= render "pages/home/risk_management" %>
+  <%= render "pages/home/mt5" %>
+  <%= render "pages/home/security" %>
+  <%= render "pages/home/faq" %>
+  <%= render "pages/home/cta" %>
+</main>
+
+<%= render "shared/footer" %>

@@ -1,0 +1,47 @@
+<% content_for :title, "Set up two-factor authentication · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/app_shell",
+           locals: { title: "Set up two-factor authentication",
+                     subtitle: "An authenticator app adds a second step to logging in." } do %>
+  <div class="mx-auto max-w-2xl space-y-4">
+    <%= render "components/alert", variant: :info,
+               body: "Two-factor authentication is strongly recommended on an account that can issue trading credentials. An API token can place orders through your broker." %>
+
+    <div class="card">
+      <div class="card-header"><h2 class="heading-4">1. Scan this code</h2></div>
+      <div class="card-body">
+        <p class="body-sm mb-4">
+          Scan with Google Authenticator, 1Password, Authy or any TOTP app.
+        </p>
+        <div class="inline-block rounded-lg border border-border bg-surface-sunken p-3">
+          <%= @qr_code %>
+        </div>
+        <details class="mt-4">
+          <summary class="cursor-pointer text-sm text-text-secondary">Can't scan? Enter this key manually</summary>
+          <code class="mono mt-2 block overflow-x-auto rounded-md border border-border bg-surface-sunken p-3 text-sm text-text-primary"><%= current_user.otp_secret %></code>
+        </details>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><h2 class="heading-4">2. Confirm it works</h2></div>
+      <div class="card-body">
+        <p class="body-sm mb-4">
+          Two-factor is only switched on once a code from your app is accepted, so
+          you cannot lock yourself out by stopping here.
+        </p>
+        <%= form_with url: two_factor_settings_path, method: :post, class: "flex flex-col gap-3 sm:flex-row sm:items-end" do |form| %>
+          <div class="field flex-1">
+            <%= form.label :code, "Code from your app", class: "label" %>
+            <%= form.text_field :code, class: "input font-mono", required: true, autofocus: true,
+                  inputmode: "numeric", autocomplete: "one-time-code", placeholder: "000000" %>
+          </div>
+          <%= form.submit "Turn on two-factor", class: "btn btn-primary" %>
+        <% end %>
+      </div>
+    </div>
+
+    <%= link_to "Cancel", settings_path, class: "btn btn-ghost" %>
+  </div>
+<% end %>

@@ -1,0 +1,75 @@
+<%#
+  Site navigation.
+
+  Section links are only meaningful on the landing page, so they are rendered
+  only there; other pages get the brand and the account actions.
+%>
+<% show_sections = local_assigns.fetch(:sections, false) %>
+
+<a href="#main" class="skip-link">Skip to content</a>
+
+<header class="navbar" data-controller="mobile-menu">
+  <nav class="navbar-inner" aria-label="Main">
+    <a href="<%= root_path %>" class="navbar-brand">
+      <img src="/icon.svg" alt="" width="28" height="28" class="rounded-md" aria-hidden="true">
+      <%= Rails.application.config.x.product.name %>
+    </a>
+
+    <% if show_sections %>
+      <div class="hidden items-center gap-1 md:flex">
+        <a href="#how-it-works" class="nav-link">How It Works</a>
+        <a href="#features" class="nav-link">Features</a>
+        <a href="#risk-management" class="nav-link">Risk Management</a>
+        <a href="#faq" class="nav-link">FAQ</a>
+      </div>
+    <% end %>
+
+    <div class="hidden items-center gap-2 md:flex">
+      <% if authenticated? %>
+        <%= link_to "Dashboard", dashboard_path, class: "nav-link" %>
+        <%= link_to "Strategies", strategies_path, class: "nav-link" %>
+        <%= link_to "History", trading_history_path, class: "nav-link" %>
+        <%= link_to "Settings", settings_path, class: "nav-link" %>
+        <%= button_to "Log Out", logout_path, method: :delete, class: "btn btn-outline btn-sm" %>
+      <% else %>
+        <%= link_to "Log In", login_path, class: "nav-link" %>
+        <%= render "components/button", label: "Get Started", variant: :primary, size: :sm, href: signup_path %>
+      <% end %>
+    </div>
+
+    <button type="button" class="nav-toggle"
+            data-action="mobile-menu#toggle"
+            data-mobile-menu-target="button"
+            aria-expanded="false"
+            aria-controls="mobile-menu"
+            aria-label="Open menu">
+      <svg class="size-6" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5M3.75 17.25h16.5" />
+      </svg>
+    </button>
+  </nav>
+
+  <div id="mobile-menu" class="nav-mobile" data-mobile-menu-target="menu" hidden>
+    <% if show_sections %>
+      <a href="#how-it-works" class="nav-link" data-action="mobile-menu#close">How It Works</a>
+      <a href="#features" class="nav-link" data-action="mobile-menu#close">Features</a>
+      <a href="#risk-management" class="nav-link" data-action="mobile-menu#close">Risk Management</a>
+      <a href="#faq" class="nav-link" data-action="mobile-menu#close">FAQ</a>
+      <div class="divider my-3"></div>
+    <% end %>
+    <% if authenticated? %>
+      <%= link_to "Dashboard", dashboard_path, class: "nav-link" %>
+      <%= link_to "Strategies", strategies_path, class: "nav-link" %>
+      <%= link_to "History", trading_history_path, class: "nav-link" %>
+      <%= link_to "Settings", settings_path, class: "nav-link" %>
+      <div class="mt-3">
+        <%= button_to "Log Out", logout_path, method: :delete, class: "btn btn-outline w-full" %>
+      </div>
+    <% else %>
+      <%= link_to "Log In", login_path, class: "nav-link" %>
+      <div class="mt-3">
+        <%= render "components/button", label: "Get Started", variant: :primary, href: signup_path, class: "w-full" %>
+      </div>
+    <% end %>
+  </div>
+</header>

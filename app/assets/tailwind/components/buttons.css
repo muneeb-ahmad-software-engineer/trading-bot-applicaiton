@@ -1,0 +1,82 @@
+/*
+ * Buttons. `.btn` carries structure; a variant carries colour. Always use both:
+ *   <button class="btn btn-primary">
+ * Sizes are optional modifiers on top.
+ */
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-button border
+           border-transparent px-4 py-2.5 text-sm font-semibold whitespace-nowrap
+           cursor-pointer select-none;
+    transition-property: background-color, border-color, color, opacity;
+    transition-duration: var(--duration-fast);
+  }
+
+  .btn:disabled,
+  .btn[aria-disabled="true"] {
+    @apply cursor-not-allowed opacity-50;
+  }
+
+  /* ------------------------------------------------------------- Variants */
+
+  .btn-primary {
+    @apply bg-primary text-primary-contrast;
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    @apply bg-primary-hover;
+  }
+
+  .btn-primary:active:not(:disabled) {
+    @apply bg-primary-active;
+  }
+
+  .btn-secondary {
+    @apply bg-secondary text-secondary-contrast;
+  }
+
+  .btn-secondary:hover:not(:disabled) {
+    @apply bg-secondary-hover;
+  }
+
+  /* Bordered, transparent — the default for most non-primary actions. */
+  .btn-outline {
+    @apply border-border-strong bg-transparent text-text-primary;
+  }
+
+  .btn-outline:hover:not(:disabled) {
+    @apply bg-surface-elevated;
+  }
+
+  .btn-ghost {
+    @apply bg-transparent text-text-secondary;
+  }
+
+  .btn-ghost:hover:not(:disabled) {
+    @apply bg-surface-elevated text-text-primary;
+  }
+
+  /* Destructive actions: stopping a strategy, deleting, emergency stop. */
+  .btn-danger {
+    @apply bg-danger text-text-inverse;
+  }
+
+  .btn-danger:hover:not(:disabled) {
+    background-color: color-mix(in oklab, var(--color-danger) 85%, black);
+  }
+
+  /* ---------------------------------------------------------------- Sizes */
+
+  .btn-sm {
+    @apply px-3 py-1.5 text-xs;
+  }
+
+  .btn-lg {
+    @apply px-6 py-3 text-base;
+  }
+
+  /* Full width on mobile, intrinsic from `sm` up — the common CTA pattern. */
+  .btn-block {
+    @apply w-full sm:w-auto;
+  }
+}

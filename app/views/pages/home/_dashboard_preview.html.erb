@@ -1,0 +1,91 @@
+<%#
+  Dashboard preview.
+
+  Built from the real design system components rather than a screenshot, so it
+  cannot drift from the product. Every value is invented for layout purposes and
+  the section says so plainly, in visible text rather than a buried footnote —
+  §7 requires these read as interface examples, not results.
+%>
+<section class="section scroll-mt-16" aria-labelledby="preview-heading">
+  <div class="container-page">
+    <div class="section-header">
+      <p class="eyebrow">Dashboard preview</p>
+      <h2 id="preview-heading" class="heading-2 mt-2">Your strategy at a glance</h2>
+      <p class="body mt-4">
+        A single view of what your bot is doing right now.
+      </p>
+    </div>
+
+    <div class="mt-10">
+      <p class="badge badge-warning badge-wrap mb-3">
+        Interface example — placeholder values, not trading results
+      </p>
+
+      <div class="card-elevated overflow-hidden" role="img"
+           aria-label="Example dashboard interface showing placeholder values for bot status, price, positions and basket profit and loss.">
+        <div class="card-header flex-wrap">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="badge badge-primary mono">XAUUSD</span>
+            <%= render "components/status", state: :live, label: "Bot running" %>
+          </div>
+          <span class="caption">Example data</span>
+        </div>
+
+        <div class="card-body">
+          <div class="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+            <%= render "components/stat", label: "Current price", value: "2,318.45" %>
+            <%= render "components/stat", label: "Basket P/L", value: "+184.20", tone: :profit %>
+            <%= render "components/stat", label: "Open positions", value: "6" %>
+            <%= render "components/stat", label: "Grid status", value: "Active", hint: "Level 6 of 12" %>
+          </div>
+
+          <div class="divider my-6"></div>
+
+          <div class="grid gap-6 sm:grid-cols-3">
+            <%= render "components/stat", label: "Take profit", value: "250.00", hint: "Basket target" %>
+            <%= render "components/stat", label: "Stop loss", value: "−400.00", hint: "Basket limit" %>
+            <%= render "components/stat", label: "Exposure", value: "0.18 lots", hint: "Of 0.50 maximum" %>
+          </div>
+        </div>
+
+        <div class="table-wrap rounded-none border-x-0 border-b-0">
+          <table class="table">
+            <caption class="sr-only">Example open positions with placeholder values</caption>
+            <thead>
+              <tr>
+                <th scope="col">Level</th>
+                <th scope="col">Direction</th>
+                <th scope="col" class="col-numeric">Lots</th>
+                <th scope="col" class="col-numeric">Open price</th>
+                <th scope="col" class="col-numeric">P/L</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="mono">1</td><td>Buy</td>
+                <td class="col-numeric">0.01</td><td class="col-numeric">2,310.20</td>
+                <td class="col-numeric figure-profit">+82.50</td>
+              </tr>
+              <tr>
+                <td class="mono">2</td><td>Buy</td>
+                <td class="col-numeric">0.02</td><td class="col-numeric">2,295.80</td>
+                <td class="col-numeric figure-profit">+101.70</td>
+              </tr>
+              <tr>
+                <td class="mono">3</td><td>Buy</td>
+                <td class="col-numeric">0.03</td><td class="col-numeric">2,281.40</td>
+                <td class="col-numeric figure-loss">−12.30</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <p class="caption mt-3">
+        All figures shown are placeholders used to illustrate the interface. They are not
+        real trades, not historical results, and not an indication of what any strategy
+        will do.
+      </p>
+    </div>
+  </div>
+</section>

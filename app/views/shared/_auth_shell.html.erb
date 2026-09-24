@@ -1,0 +1,28 @@
+<%#
+  Centred single-column shell shared by log in, sign up and password reset.
+%>
+<%= render "shared/navbar" %>
+<%= render "shared/flash" %>
+
+<main id="main" class="container-page section-tight">
+  <div class="mx-auto w-full max-w-md">
+    <div class="text-center">
+      <h1 class="heading-1"><%= title %></h1>
+      <% if local_assigns[:subtitle].present? %>
+        <p class="body mt-3"><%= subtitle %></p>
+      <% end %>
+    </div>
+
+    <div class="card mt-8">
+      <div class="card-body">
+        <%= yield %>
+      </div>
+    </div>
+
+    <% if local_assigns[:aside].present? %>
+      <p class="body-sm mt-6 text-center"><%= aside %></p>
+    <% end %>
+  </div>
+</main>
+
+<%= render "shared/footer" %>

@@ -1,0 +1,85 @@
+<%#
+  Authenticated application shell.
+
+  Persistent left navigation on desktop, bottom tabs on a phone. Connection
+  state is rendered in both, because on a trading platform the answer to "is my
+  terminal reporting?" must never be more than a glance away.
+%>
+<a href="#main" class="skip-link">Skip to content</a>
+
+<div class="app-layout" data-controller="sidebar">
+  <%= render "shared/sidebar" %>
+
+  <div class="app-content">
+    <header class="app-header">
+      <%# Desktop: collapse the sidebar to an icon rail. %>
+      <button type="button" class="hidden lg:inline-flex size-9 items-center justify-center rounded-md text-text-muted hover:bg-surface-elevated hover:text-text-primary"
+              data-action="sidebar#toggle" data-sidebar-target="toggle"
+              aria-label="Collapse navigation" aria-expanded="true">
+        <svg class="size-5" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5"/>
+        </svg>
+      </button>
+
+      <%# Mobile: the brand, since the sidebar is not on screen. %>
+      <span class="flex items-center gap-2 lg:hidden">
+        <img src="/icon.svg" alt="" width="24" height="24" class="rounded" aria-hidden="true">
+        <span class="text-sm font-semibold text-text-primary"><%= Rails.application.config.x.product.name %></span>
+      </span>
+
+      <div class="min-w-0 flex-1">
+        <h1 class="truncate text-base font-semibold text-text-primary sm:text-lg"><%= title %></h1>
+        <% if local_assigns[:subtitle].present? %>
+          <p class="hidden truncate text-xs text-text-secondary sm:block"><%= subtitle %></p>
+        <% end %>
+      </div>
+
+      <div class="flex shrink-0 items-center gap-2"><%= local_assigns[:actions] %></div>
+    </header>
+
+    <%= render "shared/flash" %>
+
+    <% unless current_user.verified? %>
+      <% verify_body = capture do %>
+        You can explore and configure a draft strategy now. Before you can connect
+        MT5 or start a strategy, confirm your email address.
+        <div class="mt-3 flex flex-wrap gap-2">
+          <%= button_to "Resend verification email", resend_verification_path,
+                method: :post, class: "btn btn-outline btn-sm" %>
+          <%# In development no real email is sent — it is captured in the local
+              inbox, so point the developer straight at it. %>
+          <% if Rails.env.development? %>
+            <%= link_to "Open development inbox", dev_mails_path,
+                  class: "btn btn-ghost btn-sm", target: "_blank", rel: "noopener" %>
+          <% end %>
+        </div>
+      <% end %>
+
+      <div class="px-4 pt-4 sm:px-6">
+        <%= render "components/alert", variant: :warning,
+                   title: "Verify your email address", body: verify_body %>
+      </div>
+    <% end %>
+
+    <main id="main" class="app-main">
+      <%= yield %>
+    </main>
+
+    <%#
+      A condensed risk warning rather than the marketing footer. It stays on
+      every page of the application because the product automates leveraged
+      trading, and that is not a fact to state once on a landing page.
+    %>
+    <footer class="border-t border-border px-4 py-4 sm:px-6">
+      <p class="caption">
+        <strong class="text-text-secondary">Risk warning.</strong>
+        Trading XAUUSD is leveraged and carries a substantial risk of loss. Risk
+        controls limit exposure to the settings you choose; they do not remove the
+        risk of loss, and they are enforced by your Expert Advisor rather than by
+        this platform.
+      </p>
+    </footer>
+  </div>
+
+  <%= render "shared/tab_bar" %>
+</div>

@@ -1,0 +1,40 @@
+<%
+  product = Rails.application.config.x.product
+  page_title = content_for(:title).presence || "#{product.name} — #{product.tagline}"
+%>
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+  <head>
+    <meta charset="utf-8">
+    <title><%= page_title %></title>
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+    <meta name="description" content="<%= content_for(:description).presence || product.description %>">
+    <meta name="theme-color" content="<%= product.theme_color %>">
+
+    <%# Installed-app behaviour on iOS and Android %>
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="<%= product.name %>">
+    <meta name="application-name" content="<%= product.name %>">
+
+    <%= csrf_meta_tags %>
+    <%= csp_meta_tag %>
+
+    <%= yield :head %>
+
+    <%= tag.link rel: "manifest", href: pwa_manifest_path(format: :json) %>
+
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="icon" href="/icons/icon-192.png" type="image/png" sizes="192x192">
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+
+    <%# Includes all stylesheet files in app/assets/stylesheets %>
+    <%= stylesheet_link_tag :app, "data-turbo-track": "reload" %>
+    <%= javascript_importmap_tags %>
+  </head>
+
+  <body class="min-h-full bg-background text-text-primary antialiased">
+    <%= yield %>
+  </body>
+</html>

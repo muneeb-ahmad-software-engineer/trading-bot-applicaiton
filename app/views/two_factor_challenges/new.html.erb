@@ -1,0 +1,24 @@
+<% content_for :title, "Two-factor authentication · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/auth_shell",
+           locals: { title: "Two-factor authentication",
+                     subtitle: "Enter the 6-digit code from your authenticator app." } do %>
+  <%= form_with url: login_two_factor_path, method: :post, class: "space-y-4" do |form| %>
+    <div class="field">
+      <%= form.label :code, "Authentication code", class: "label" %>
+      <%= form.text_field :code, class: "input text-center tracking-[0.4em] font-mono text-lg",
+            required: true, autofocus: true, autocomplete: "one-time-code",
+            inputmode: "numeric", maxlength: 20, placeholder: "000000",
+            "aria-describedby": "code_hint" %>
+      <p class="field-hint" id="code_hint">
+        You can also enter one of your recovery codes.
+      </p>
+    </div>
+    <%= form.submit "Verify", class: "btn btn-primary w-full" %>
+  <% end %>
+
+  <div class="divider mt-6 pt-4">
+    <%= button_to "Cancel and log out", logout_path, method: :delete, class: "btn btn-ghost btn-sm w-full" %>
+  </div>
+<% end %>

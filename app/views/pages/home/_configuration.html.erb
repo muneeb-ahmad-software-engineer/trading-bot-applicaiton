@@ -1,0 +1,44 @@
+<%
+  # The parameters a user controls. Descriptions state what each setting *does*,
+  # never that a particular value performs well.
+  parameters = [
+    { name: "Order direction",     body: "Run the grid long only, short only, or in both directions." },
+    { name: "Grid spacing",        body: "The distance between grid levels." },
+    { name: "Initial lot size",    body: "The size of the first position in a basket." },
+    { name: "Lot sizing mode",     body: "Keep each level the same size, or scale subsequent levels." },
+    { name: "Grid levels",         body: "How many levels the grid is allowed to open." },
+    { name: "Basket take profit",  body: "The combined profit target at which a basket is closed." },
+    { name: "Basket stop loss",    body: "The combined loss at which a basket is closed." },
+    { name: "Maximum positions",   body: "A hard ceiling on how many positions can be open at once." },
+    { name: "Maximum exposure",    body: "A ceiling on total position size across the basket." },
+    { name: "Drawdown protection", body: "Stop opening new positions when drawdown reaches your threshold." },
+    { name: "Margin protection",   body: "Halt activity when the margin level falls below your threshold." }
+  ]
+%>
+<section id="features" class="section scroll-mt-16" aria-labelledby="config-heading">
+  <div class="container-page">
+    <div class="section-header">
+      <p class="eyebrow">Strategy configuration</p>
+      <h2 id="config-heading" class="heading-2 mt-2">Every parameter under your control</h2>
+      <p class="body mt-4">
+        A grid strategy is defined entirely by its parameters. All of them are yours to
+        set, and you can change them between baskets.
+      </p>
+    </div>
+
+    <dl class="mt-12 grid gap-x-8 gap-y-6 sm:grid-cols-2 lg:grid-cols-3">
+      <% parameters.each do |parameter| %>
+        <div class="border-l-2 border-border pl-4">
+          <dt class="heading-4"><%= parameter[:name] %></dt>
+          <dd class="body-sm mt-1"><%= parameter[:body] %></dd>
+        </div>
+      <% end %>
+    </dl>
+
+    <p class="caption mt-10 max-w-3xl">
+      These settings describe how a strategy behaves. No combination of them is
+      recommended, and no configuration is profitable by design — the appropriate values
+      depend on your own risk tolerance and account.
+    </p>
+  </div>
+</section>

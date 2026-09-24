@@ -1,0 +1,24 @@
+<% content_for :title, "Confirm your password · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/auth_shell",
+           locals: { title: "Confirm your password",
+                     subtitle: "This action changes account security, so please confirm it's you." } do %>
+  <%= form_with url: reauthentications_path, method: :post, class: "space-y-4" do |form| %>
+    <div class="field">
+      <%= form.label :password, "Password", class: "label" %>
+      <%= form.password_field :password, class: "input", required: true, autofocus: true,
+            autocomplete: "current-password" %>
+    </div>
+
+    <% if current_user.otp_enabled? %>
+      <div class="field">
+        <%= form.label :code, "Authentication code", class: "label" %>
+        <%= form.text_field :code, class: "input font-mono", required: true,
+              autocomplete: "one-time-code", inputmode: "numeric", placeholder: "000000" %>
+      </div>
+    <% end %>
+
+    <%= form.submit "Confirm", class: "btn btn-primary w-full" %>
+  <% end %>
+<% end %>

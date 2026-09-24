@@ -1,0 +1,68 @@
+<%#
+  Desktop navigation.
+
+  Connection state sits above the account footer so it is visible on every
+  page. On a trading platform "is my terminal reporting?" is not something to
+  go looking for — it is the first thing you check, every time.
+%>
+<% snapshot = DashboardSnapshot.new(current_user) %>
+
+<aside class="sidebar hidden lg:flex" aria-label="Main">
+  <div class="sidebar-brand">
+    <img src="/icon.svg" alt="" width="28" height="28" class="rounded-md shrink-0" aria-hidden="true">
+    <span class="sidebar-brand-text"><%= Rails.application.config.x.product.name %></span>
+  </div>
+
+  <nav class="sidebar-nav">
+    <% app_navigation.each do |group| %>
+      <div class="sidebar-group">
+        <p class="sidebar-group-label"><%= group[:label] %></p>
+        <ul class="space-y-0.5">
+          <% group[:items].each do |item| %>
+            <% current = nav_current?(item[:path]) %>
+            <li>
+              <%= link_to item[:path],
+                    class: class_names("sidebar-link", "sidebar-link-active": current),
+                    "aria-current": (current ? "page" : nil) do %>
+                <%= nav_icon(item[:icon]) %>
+                <span class="sidebar-label"><%= item[:name] %></span>
+                <% if item[:badge].to_i.positive? %>
+                  <span class="sidebar-badge"><%= item[:badge] %><span class="sr-only"> unread</span></span>
+                <% end %>
+              <% end %>
+            </li>
+          <% end %>
+        </ul>
+      </div>
+    <% end %>
+  </nav>
+
+  <div class="sidebar-status mb-3"
+       data-controller="connection-freshness"
+       data-connection-freshness-last-report-value="<%= snapshot.last_report_iso %>"
+       data-connection-freshness-stale-after-value="<%= DashboardSnapshot::STALE_AFTER.to_i %>">
+    <span data-connection-freshness-target="status">
+      <%= render "dashboard/connection_status", connection: snapshot.connection %>
+    </span>
+    <span class="caption sidebar-status-detail" data-connection-freshness-target="age">
+      <%= snapshot.connection&.last_report_at ? "#{time_ago_in_words(snapshot.connection.last_report_at)} ago" : "No terminal yet" %>
+    </span>
+  </div>
+
+  <div class="sidebar-footer">
+    <span class="flex size-8 shrink-0 items-center justify-center rounded-full bg-surface-elevated text-xs font-semibold text-text-primary"
+          aria-hidden="true"><%= current_user.email_address.first(2).upcase %></span>
+    <span class="sidebar-footer-text min-w-0 flex-1">
+      <span class="block truncate text-xs text-text-secondary"><%= current_user.email_address %></span>
+    </span>
+    <%= button_to logout_path, method: :delete, class: "sidebar-footer-action",
+          form: { class: "shrink-0" }, "aria-label": "Log out" do %>
+      <span class="inline-flex size-9 items-center justify-center rounded-md text-text-muted hover:bg-surface-elevated hover:text-text-primary">
+        <svg class="size-5" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round"
+                d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M18.75 15L21.75 12m0 0l-3-3m3 3H9"/>
+        </svg>
+      </span>
+    <% end %>
+  </div>
+</aside>

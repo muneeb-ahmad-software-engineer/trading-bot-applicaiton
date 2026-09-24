@@ -1,0 +1,287 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Pretends to be an MT5 terminal.
+#
+# Posts the same payloads the Expert Advisor sends, so the whole platform —
+# token authentication, ingestion, the dashboard, history and alerting — can be
+# exercised before MetaTrader is involved at all. Nothing here touches a broker.
+#
+#   bin/simulate_terminal --token ggk_xxx --strategy 1
+#   bin/simulate_terminal --token ggk_xxx --strategy 1 --scenario losing
+#   bin/simulate_terminal --token ggk_xxx --strategy 1 --once
+#
+# Scenarios:
+#   winning   basket drifts into profit          (default)
+#   losing    basket drifts into loss
+#   margin    margin level falls below a limit   (should raise an alert)
+#   silent    reports once, then stops           (should raise a stale-terminal alert)
+#   trailing  a buy and a sell running side by side, each with a trailing stop
+#             that ratchets, stops out, and re-enters — no broker involved
+
+require "json"
+require "net/http"
+require "optparse"
+require "uri"
+
+options = {
+  url: ENV.fetch("GOLDGRID_URL", "http://localhost:3000"),
+  token: ENV["GOLDGRID_TOKEN"],
+  strategy: ENV["GOLDGRID_STRATEGY"],
+  interval: 10,
+  scenario: "winning",
+  levels: 4,
+  trail: 2.0,
+  once: false
+}
+
+OptionParser.new do |parser|
+  parser.banner = "Usage: bin/simulate_terminal --token TOKEN --strategy ID [options]"
+  parser.on("--url URL", "Platform URL (default #{options[:url]})") { options[:url] = _1 }
+  parser.on("--token TOKEN", "API token from Settings > API tokens") { options[:token] = _1 }
+  parser.on("--strategy ID", "Strategy id to report against") { options[:strategy] = _1 }
+  parser.on("--interval N", Integer, "Seconds between reports (default 10)") { options[:interval] = _1 }
+  parser.on("--levels N", Integer, "How many grid levels to open (default 4)") { options[:levels] = _1 }
+  parser.on("--scenario NAME", "winning | losing | margin | silent | trailing") { options[:scenario] = _1 }
+  parser.on("--trail N", Float, "Trailing distance in dollars (default 2.0)") { options[:trail] = _1 }
+  parser.on("--once", "Send a single report and exit") { options[:once] = true }
+  parser.on("-h", "--help") { puts parser; exit }
+end.parse!
+
+abort "Missing --token. Create one at #{options[:url]}/settings/api-tokens" if options[:token].to_s.empty?
+abort "Missing --strategy. Open a strategy and take the id from its URL." if options[:strategy].to_s.empty?
+
+BASE_PRICE = 2318.40
+uri = URI.join(options[:url], "/api/v1/trading/report")
+
+def money(value) = format("%.2f", value)
+def price(value) = format("%.5f", value)
+
+tick = 0
+
+# --------------------------------------------------------------- Trailing
+#
+# A scripted price path rather than a random walk, so the run is reproducible
+# and so it passes through the numbers from the worked example: a buy at $345,
+# a $2 margin, the stop landing at $353 when price reaches $355 and moving to
+# $363 when it reaches $365. It cycles, so the run continues indefinitely.
+TRAILING_PATH = [
+  345.00, 348.00, 352.00, 355.00, 358.00, 361.00, 365.00, 364.00,
+  362.00, 359.00, 355.00, 351.00, 348.00, 345.00, 343.00, 346.00,
+  350.00, 354.00
+].freeze
+
+# One open position per direction, or nil when that side is flat and waiting to
+# re-enter. `best` is the most favourable price the position has seen, which is
+# what the stop is measured back from.
+legs = { "buy" => nil, "sell" => nil }
+next_ticket = 3000
+
+# Everything the EA does to a stop, in the order it does it. The one rule worth
+# watching in the UI: `stop` is only ever assigned a better value.
+advance_leg = lambda do |direction, leg, bid, ask, trail|
+  exit_price = direction == "buy" ? bid : ask
+
+  if direction == "buy"
+    leg[:best] = [ leg[:best], bid ].max
+    leg[:stop] = [ leg[:stop], leg[:best] - trail ].max    # never moves down
+    stopped = exit_price <= leg[:stop]
+  else
+    leg[:best] = [ leg[:best], ask ].min
+    leg[:stop] = [ leg[:stop], leg[:best] + trail ].min    # never moves up
+    stopped = exit_price >= leg[:stop]
+  end
+
+  stopped
+end
+
+send_report = lambda do
+  tick += 1
+
+  if options[:scenario] == "trailing"
+    bid = TRAILING_PATH[(tick - 1) % TRAILING_PATH.length]
+    ask = bid + 0.05
+
+    positions = []
+
+    %w[buy sell].each do |direction|
+      leg = legs[direction]
+
+      if leg
+        if advance_leg.call(direction, leg, bid, ask, options[:trail])
+          puts format("%s  %-4s STOPPED OUT at %.2f (stop was %.2f, entry %.2f)",
+                      Time.now.strftime("%H:%M:%S"), direction.upcase,
+                      direction == "buy" ? bid : ask, leg[:stop], leg[:open])
+          leg = legs[direction] = nil
+        end
+      end
+
+      # Flat, so open again. This is the re-entry: neither side ever waits for
+      # the other, and neither needs restarting between trades.
+      if leg.nil?
+        open_price = direction == "buy" ? ask : bid
+        next_ticket += 1
+        leg = legs[direction] = {
+          ticket: "SIM#{next_ticket}",
+          open: open_price,
+          best: open_price,
+          stop: direction == "buy" ? open_price - options[:trail] : open_price + options[:trail],
+          opened_at: Time.now.utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+        }
+        puts format("%s  %-4s OPENED at %.2f (stop %.2f)",
+                    Time.now.strftime("%H:%M:%S"), direction.upcase, open_price, leg[:stop])
+      end
+
+      volume = 0.01
+      current = direction == "buy" ? bid : ask
+      profit = (direction == "buy" ? current - leg[:open] : leg[:open] - current) * volume * 100
+
+      positions << {
+        ticket: leg[:ticket],
+        direction: direction,
+        grid_level: 1,
+        volume: money(volume),
+        open_price: price(leg[:open]),
+        current_price: price(current),
+        stop_loss: price(leg[:stop]),
+        profit: money(profit),
+        swap: money(0),
+        commission: money(-0.1),
+        opened_at: leg[:opened_at]
+      }
+    end
+
+    equity_change = positions.sum { _1[:profit].to_f + _1[:swap].to_f + _1[:commission].to_f }
+    balance = 10_000.0
+    equity = balance + equity_change
+    margin = 120.0
+
+    payload = {
+      strategy_id: options[:strategy].to_i,
+      terminal: { ea_version: "simulator", broker: "Simulated Broker",
+                  account_login: "DEMO-0001", symbol: "XAUUSD" },
+      tick: { bid: price(bid), ask: price(ask), spread_points: 5 },
+      account: { currency: "USD", balance: money(balance), equity: money(equity),
+                 margin: money(margin), free_margin: money(equity - margin),
+                 margin_level_percent: money(equity / margin * 100) },
+      positions: positions,
+      orders: []
+    }
+
+    request = Net::HTTP::Post.new(uri)
+    request["Content-Type"] = "application/json"
+    request["Authorization"] = "Bearer #{options[:token]}"
+    request.body = payload.to_json
+
+    response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https") do |http|
+      http.read_timeout = 10
+      http.request(request)
+    end
+
+    status = response.code.to_i
+    stops = positions.map { "#{_1[:direction]} stop #{format('%.2f', _1[:stop_loss].to_f)}" }.join("  ")
+    label = format("%s  price %.2f  %s", Time.now.strftime("%H:%M:%S"), bid, stops)
+
+    if status == 202
+      puts "#{label}  -> accepted"
+    else
+      puts "#{label}  -> HTTP #{status}: #{response.body.to_s[0, 160]}"
+      exit 1 if [ 401, 403, 422 ].include?(status)
+    end
+
+    # This scenario builds and sends its own payload, so the grid report below
+    # is not also sent for the same tick.
+    next
+  end
+
+  # Price wanders; the direction of the drift is what the scenario controls.
+  drift = case options[:scenario]
+  when "losing", "margin" then -tick * 0.9
+  else tick * 0.6
+  end
+  bid = BASE_PRICE + drift + rand(-0.4..0.4)
+  ask = bid + 0.05
+
+  positions = Array.new(options[:levels]) do |i|
+    open_price = BASE_PRICE - (i * 15)
+    volume = 0.01 * (i + 1)
+    # Profit in account currency: 100 units per whole point, per lot.
+    profit = (bid - open_price) * volume * 100
+
+    {
+      ticket: "SIM#{1000 + i}",
+      direction: "buy",
+      grid_level: i + 1,
+      volume: money(volume),
+      open_price: price(open_price),
+      current_price: price(bid),
+      stop_loss: price(0),
+      profit: money(profit),
+      swap: money(-0.2 * (i + 1)),
+      commission: money(-0.1 * (i + 1)),
+      opened_at: (Time.now - (options[:levels] - i) * 3600).utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    }
+  end
+
+  equity_change = positions.sum { _1[:profit].to_f + _1[:swap].to_f + _1[:commission].to_f }
+  balance = 10_000.0
+  equity = balance + equity_change
+  margin = 120.0
+  margin_level = options[:scenario] == "margin" ? 120.0 : (equity / margin * 100)
+
+  payload = {
+    strategy_id: options[:strategy].to_i,
+    terminal: { ea_version: "simulator", broker: "Simulated Broker",
+                account_login: "DEMO-0001", symbol: "XAUUSD" },
+    tick: { bid: price(bid), ask: price(ask), spread_points: 5 },
+    account: { currency: "USD", balance: money(balance), equity: money(equity),
+               margin: money(margin), free_margin: money(equity - margin),
+               margin_level_percent: money(margin_level) },
+    positions: positions,
+    orders: [ { ticket: "SIM2001", order_type: "buy_limit",
+                grid_level: options[:levels] + 1, volume: money(0.01 * (options[:levels] + 1)),
+                price: price(BASE_PRICE - (options[:levels] * 15)),
+                placed_at: (Time.now - 3600).utc.strftime("%Y-%m-%dT%H:%M:%SZ") } ]
+  }
+
+  request = Net::HTTP::Post.new(uri)
+  request["Content-Type"] = "application/json"
+  request["Authorization"] = "Bearer #{options[:token]}"
+  request.body = payload.to_json
+
+  response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https") do |http|
+    http.read_timeout = 10
+    http.request(request)
+  end
+
+  status = response.code.to_i
+  label = "#{Time.now.strftime('%H:%M:%S')}  bid #{price(bid)}  P/L #{money(equity_change)}"
+
+  if status == 202
+    puts "#{label}  -> accepted"
+  else
+    puts "#{label}  -> HTTP #{status}: #{response.body.to_s[0, 160]}"
+    # A revoked token or a rejected payload will not fix itself by retrying.
+    exit 1 if [ 401, 403, 422 ].include?(status)
+  end
+rescue StandardError => e
+  puts "#{Time.now.strftime('%H:%M:%S')}  -> could not reach #{options[:url]}: #{e.class}: #{e.message}"
+end
+
+puts "Reporting to #{uri} as strategy #{options[:strategy]} (scenario: #{options[:scenario]})"
+puts "Press Ctrl+C to stop.\n\n"
+
+send_report.call
+
+if options[:scenario] == "silent"
+  puts "\nScenario 'silent': one report sent, now going quiet."
+  puts "Within ~90 seconds the platform should mark the terminal stale and alert you."
+  exit 0
+end
+
+exit 0 if options[:once]
+
+loop do
+  sleep options[:interval]
+  send_report.call
+end

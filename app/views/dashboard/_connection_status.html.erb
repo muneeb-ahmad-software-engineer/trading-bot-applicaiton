@@ -1,0 +1,17 @@
+<%#
+  Connection state.
+
+  "Stale" and "flat" are deliberately distinct. A terminal that has stopped
+  reporting is not the same as a terminal reporting no open positions, and
+  showing the second when the first is true would tell a user their account is
+  quiet when in fact nobody is watching it.
+%>
+<% case connection&.status
+   when :live %>
+  <%= render "components/status", state: :live, label: "MT5 connected" %>
+<% when :stale %>
+  <%= render "components/status", state: :error,
+             label: "Terminal not reporting since #{time_ago_in_words(connection.last_report_at)} ago" %>
+<% else %>
+  <%= render "components/status", state: :stopped, label: "No MT5 terminal connected" %>
+<% end %>

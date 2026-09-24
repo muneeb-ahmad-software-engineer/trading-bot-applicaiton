@@ -1,0 +1,31 @@
+<%#
+  Risk utilisation for a running strategy: how much of each configured ceiling
+  is currently in use. Values come from what the terminal reported, never from
+  what the configuration hopes.
+%>
+<div class="card">
+  <div class="card-header">
+    <div>
+      <h2 class="heading-4">Risk utilisation</h2>
+      <p class="caption mt-0.5">Against the limits configured on this strategy.</p>
+    </div>
+  </div>
+  <div class="card-body">
+    <div class="grid gap-6 sm:grid-cols-2">
+      <%= render "trading/risk_meter",
+                 label: "Open positions",
+                 used: positions.size,
+                 limit: strategy.max_positions %>
+
+      <%= render "trading/risk_meter",
+                 label: "Exposure (lots)",
+                 used: positions.sum(&:volume),
+                 limit: strategy.max_exposure_lots %>
+    </div>
+
+    <p class="caption mt-6">
+      These limits are enforced by your Expert Advisor, not by this platform.
+      The figures above describe what your terminal reported.
+    </p>
+  </div>
+</div>

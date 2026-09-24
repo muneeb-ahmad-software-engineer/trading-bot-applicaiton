@@ -1,0 +1,141 @@
+<% content_for :title, "Broker account · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/app_shell",
+           locals: { title: "Broker account",
+                     subtitle: "The MT5 account your terminal signs in to when a strategy runs." } do %>
+  <div class="space-y-4">
+    <%= render "components/alert", variant: :warning,
+               title: "Use a demo account until you trust this system",
+               body: "These details let the platform place real orders on your behalf. " \
+                     "Nothing here can verify that a strategy is profitable, and a grid strategy " \
+                     "can lose more than it makes." %>
+
+    <% if @credential.persisted? %>
+      <% if @credential.last_verification_error.present? %>
+        <%= render "components/alert", variant: :danger,
+                   title: "These details have not worked",
+                   body: @credential.last_verification_error %>
+      <% elsif @credential.verified? %>
+        <%= render "components/alert", variant: :success,
+                   title: "Signed in successfully",
+                   body: "A terminal last signed in to this account #{time_ago_in_words(@credential.last_verified_at)} ago." %>
+      <% else %>
+        <%= render "components/alert", variant: :info,
+                   title: "Not checked yet",
+                   body: "Nothing has signed in with these details yet. They are confirmed the first time a " \
+                         "terminal connects, which happens when you start a strategy — this platform never " \
+                         "contacts your broker itself." %>
+      <% end %>
+    <% end %>
+
+    <% if @credential.errors.any? %>
+      <%= render "components/alert", variant: :danger,
+                 title: "Your broker details were not saved",
+                 body: @credential.errors.full_messages.to_sentence %>
+    <% end %>
+
+    <%= render "components/card",
+               title: @credential.persisted? ? "Update broker details" : "Add broker details",
+               subtitle: "Stored encrypted. Never shown again once saved.",
+               body: capture { %>
+      <%= form_with model: @credential, url: broker_credential_path, method: :patch, class: "space-y-4" do |form| %>
+        <div class="field">
+          <%= form.label :server, "Broker server", class: "label" %>
+          <%= form.text_field :server, class: "input", required: true, autocomplete: "off",
+                placeholder: "e.g. ICMarketsSC-Demo", "aria-describedby": "broker_server_hint" %>
+          <p class="field-hint" id="broker_server_hint">
+            Exactly as it appears in MetaTrader's login dialog. A wrong server is the
+            most common reason a terminal never connects.
+          </p>
+        </div>
+
+        <div class="field">
+          <%= form.label :login, "Account number", class: "label" %>
+          <%= form.text_field :login, class: "input-numeric", required: true, autocomplete: "off",
+                inputmode: "numeric", "aria-describedby": "broker_login_hint" %>
+          <p class="field-hint" id="broker_login_hint">The numeric MT5 login, not your broker portal email.</p>
+        </div>
+
+        <div class="field">
+          <%= form.label :password, "Trading password", class: "label" %>
+          <%= form.password_field :password, class: "input", autocomplete: "new-password",
+                required: !@credential.persisted?, "aria-describedby": "broker_password_hint" %>
+          <p class="field-hint" id="broker_password_hint">
+            <% if @credential.persisted? %>
+              Leave blank to keep the password already stored.
+            <% end %>
+            Use the trading password, never the investor or broker-portal password.
+          </p>
+        </div>
+
+        <div class="field">
+          <%= form.label :demo, "Account type", class: "label" %>
+          <%= form.select :demo,
+                [ [ "Demo account", "true" ], [ "Live account — real money", "false" ] ],
+                {}, class: "select", "aria-describedby": "broker_demo_hint" %>
+          <p class="field-hint" id="broker_demo_hint">
+            Marked on your dashboard so a live account is never mistaken for a demo one.
+          </p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2 pt-2">
+          <%= form.submit @credential.persisted? ? "Save changes" : "Save broker details", class: "btn btn-primary" %>
+          <% if @credential.persisted? %>
+            <%= button_to "Remove broker details", broker_credential_path, method: :delete,
+                  class: "btn btn-ghost text-danger",
+                  form: { data: { turbo_confirm: "Remove your broker details? Your terminal will be shut down and no further orders will be placed." } } %>
+          <% end %>
+        </div>
+      <% end %>
+    <% } %>
+
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <h2 class="heading-4">Your terminal</h2>
+          <p class="caption mt-0.5">Started automatically when you start a strategy.</p>
+        </div>
+        <% if @instance %>
+          <%= render "components/status",
+                     state: @instance.healthy? ? :running : (@instance.failed? ? :error : :warning),
+                     label: @instance.state.humanize %>
+        <% else %>
+          <%= render "components/status", state: :stopped, label: "Not provisioned" %>
+        <% end %>
+      </div>
+      <div class="card-body">
+        <% if @instance.nil? %>
+          <p class="body-sm">
+            <% if @credential.persisted? %>
+              No terminal yet. One is created for you the first time you start a strategy.
+            <% else %>
+              Add your broker details above, then start a strategy. If you would rather run
+              MetaTrader yourself, skip this page and use an
+              <%= link_to "API token", api_tokens_path, class: "link" %> instead.
+            <% end %>
+          </p>
+        <% else %>
+          <dl class="grid gap-3 sm:grid-cols-2">
+            <div>
+              <dt class="caption">Last heartbeat</dt>
+              <dd class="figure-sm">
+                <%= @instance.last_heartbeat_at ? "#{time_ago_in_words(@instance.last_heartbeat_at)} ago" : "Never" %>
+              </dd>
+            </div>
+            <div>
+              <dt class="caption">Strategy</dt>
+              <dd class="body-sm"><%= @instance.strategy&.name || "None" %></dd>
+            </div>
+          </dl>
+          <% if @instance.last_error_message.present? %>
+            <div class="mt-4">
+              <%= render "components/alert", variant: :danger,
+                         title: "Last error", body: @instance.last_error_message %>
+            </div>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+  </div>
+<% end %>

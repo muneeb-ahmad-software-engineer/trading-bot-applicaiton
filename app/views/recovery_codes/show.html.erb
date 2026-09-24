@@ -1,0 +1,28 @@
+<% content_for :title, "Recovery codes · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/app_shell",
+           locals: { title: "Save your recovery codes",
+                     subtitle: "These get you back in if you lose your authenticator device." } do %>
+  <div class="mx-auto max-w-2xl space-y-4">
+    <%= render "components/alert", variant: :warning,
+               title: "Shown once",
+               body: "These codes are stored only as hashes, so they cannot be shown again. Save them somewhere safe and offline. Each one works a single time." %>
+
+    <div class="card">
+      <div class="card-body">
+        <ul class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <% @codes.each do |code| %>
+            <li class="mono rounded-md border border-border bg-surface-sunken px-3 py-2 text-sm text-text-primary">
+              <%= code %>
+            </li>
+          <% end %>
+        </ul>
+      </div>
+    </div>
+
+    <div class="flex flex-wrap gap-3">
+      <%= link_to "I've saved them", settings_path, class: "btn btn-primary" %>
+    </div>
+  </div>
+<% end %>

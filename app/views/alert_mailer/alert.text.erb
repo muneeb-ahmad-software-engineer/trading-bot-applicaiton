@@ -1,0 +1,13 @@
+<%= @notification.title %>
+
+<%= @notification.body %>
+
+Open your dashboard: <%= @url %>
+<% if @notification.severity == "critical" %>
+
+This alert concerns a running strategy. Positions may be open with your broker.
+Check your MT5 terminal.
+<% end %>
+
+--
+Manage notification settings: <%= URI.join(root_url, "/settings/notifications").to_s %>

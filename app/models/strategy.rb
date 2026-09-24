@@ -1,0 +1,245 @@
+# A user's XAUUSD strategy configuration.
+#
+# This model holds configuration and lifecycle state only. It places no orders:
+# execution is the MT5 Expert Advisor's job, and it reads this configuration
+# through the API. Keeping the boundary strict is what lets the platform be
+# audited independently of anything that touches a broker.
+class Strategy < ApplicationRecord
+  SYMBOLS = %w[XAUUSD].freeze
+
+  # One point on XAUUSD, used only to show a points figure back to the user as
+  # the dollar distance they were thinking in. Nothing decides anything on this
+  # number — the EA reads the broker's own _Point at runtime.
+  POINT_VALUE = BigDecimal("0.01")
+
+  # Without a minimum step, a trailing stop asks the broker to modify the
+  # position on every tick that moves a fraction in its favour. Brokers throttle
+  # or reject that. A distance is never stored without one.
+  TRAILING_STEP_DEFAULT_POINTS = 10
+
+  # Above this, a theoretical lot total is reported as "more than" rather than
+  # printed in full. The exposure ceiling itself maxes out at 1,000 lots, so any
+  # figure past this point is only ever telling the user "far too much".
+  DISPLAY_LOT_CEILING = 1_000_000
+
+  belongs_to :user
+  has_many :api_tokens, through: :user
+  has_many :positions, dependent: :destroy
+  has_many :orders, dependent: :destroy
+  has_many :account_snapshots, dependent: :nullify
+  # Nullify, not destroy: account state belongs to the account, and survives a
+  # strategy being deleted. Declared here so destroying a user cannot trip the
+  # foreign key depending on which association happens to be listed first.
+  has_one :account_state, dependent: :nullify
+  has_one :terminal_connection, dependent: :nullify
+  # A terminal outlives the strategy it happened to be running: the process is
+  # still there and still has to be stopped deliberately.
+  has_many :mt5_instances, dependent: :nullify
+
+  enum :status, { draft: "draft", running: "running", stopped: "stopped" }, validate: true
+  enum :direction, { both: "both", buy: "buy", sell: "sell" }, prefix: :direction, validate: true
+  enum :lot_mode, { fixed: "fixed", multiplier: "multiplier" }, prefix: :lot_mode, validate: true
+
+  # What the strategy does with the market, as opposed to how it exits.
+  #
+  # Prefixed on purpose. `trailing?` would read as "is this strategy trailing",
+  # which is a different question with a different answer: a grid strategy can
+  # have a trailing stop too. Asking for the category has to look like asking
+  # for the category.
+  enum :category, { grid: "grid", trailing: "trailing" }, prefix: :category, validate: true
+
+  validates :name, presence: true, length: { maximum: 80 }
+  validates :symbol, inclusion: { in: SYMBOLS }
+
+  # ------------------------------------------------------------- Grid setup
+
+  # Only a grid strategy has a grid. A trailing strategy opens a single
+  # position per direction and manages it with its stop, so requiring a spacing
+  # and a level count from it would be asking for numbers that decide nothing.
+  with_options if: :category_grid? do
+    validates :grid_spacing_points, numericality: { only_integer: true, greater_than: 0, less_than_or_equal_to: 100_000 }
+    validates :grid_levels, numericality: { only_integer: true, greater_than: 0, less_than_or_equal_to: 200 }
+  end
+
+  validates :initial_lot, numericality: { greater_than: 0, less_than_or_equal_to: 100 }
+
+  # Only meaningful in multiplier mode, and must actually scale up when present.
+  validates :lot_multiplier,
+            numericality: { greater_than_or_equal_to: 1, less_than_or_equal_to: 10 },
+            if: -> { category_grid? && lot_mode_multiplier? }
+
+  # --------------------------------------------------------- Trailing stop
+
+  # The loss margin the user is willing to give back from the best price seen.
+  # Required for a trailing strategy, optional on a grid, where it is an extra
+  # exit layered on top of the basket targets.
+  validates :trailing_stop_points, presence: true, if: :category_trailing?
+  validates :trailing_stop_points,
+            numericality: { only_integer: true, greater_than: 0, less_than_or_equal_to: 100_000 },
+            allow_nil: true
+  validates :trailing_activation_points,
+            numericality: { only_integer: true, greater_than: 0, less_than_or_equal_to: 100_000 },
+            allow_nil: true
+  validates :trailing_step_points,
+            numericality: { only_integer: true, greater_than: 0, less_than_or_equal_to: 100_000 },
+            allow_nil: true
+
+  before_validation :default_the_trailing_step
+
+  validate :trailing_settings_need_a_distance
+  validate :trailing_step_fits_inside_the_distance
+
+  # ---------------------------------------------------------- Risk controls
+
+  validates :max_positions, numericality: { only_integer: true, greater_than: 0, less_than_or_equal_to: 500 }
+  validates :max_exposure_lots, numericality: { greater_than: 0, less_than_or_equal_to: 1_000 }
+  validates :basket_take_profit, numericality: { greater_than: 0 }, allow_nil: true
+  validates :basket_stop_loss, numericality: { greater_than: 0 }, allow_nil: true
+  validates :max_drawdown_percent, numericality: { greater_than: 0, less_than_or_equal_to: 100 }, allow_nil: true
+  validates :min_margin_level_percent, numericality: { greater_than: 0 }, allow_nil: true
+  validates :max_spread_points, numericality: { only_integer: true, greater_than: 0 }, allow_nil: true
+
+  validate :grid_levels_within_max_positions
+  validate :exposure_can_accommodate_the_strategy
+
+  scope :ordered, -> { order(created_at: :desc) }
+
+  # A running strategy's configuration is what the Expert Advisor is acting on.
+  # Editing it underneath a live basket would change behaviour mid-flight, so
+  # the strategy must be stopped first.
+  def editable? = !running?
+
+  # Whether the EA will trail stops for this strategy at all. True for every
+  # trailing strategy, and for a grid that opted into the exit.
+  def trailing_enabled? = trailing_stop_points.present?
+
+  # A points distance as the dollar figure the user entered it as.
+  def self.points_to_price(points)
+    return nil if points.blank?
+
+    (points.to_d * POINT_VALUE).round(2)
+  end
+
+  def trailing_stop_price       = self.class.points_to_price(trailing_stop_points)
+  def trailing_activation_price = self.class.points_to_price(trailing_activation_points)
+  def trailing_step_price       = self.class.points_to_price(trailing_step_points)
+
+  def start!
+    raise NotVerified unless user.may_trade?
+    # Starting something already running is not a no-op: it would move
+    # started_at forward and lose the moment the strategy actually went live,
+    # which is the timestamp the audit trail and the P/L window are read
+    # against. The partial unique index cannot catch this, because a row does
+    # not conflict with itself.
+    raise AlreadyRunning if running?
+
+    update!(status: :running, started_at: Time.current, stopped_at: nil)
+  rescue ActiveRecord::RecordNotUnique
+    # The partial unique index rejected a second concurrent start.
+    raise AlreadyRunning
+  end
+
+  def stop!
+    update!(status: :stopped, stopped_at: Time.current)
+  end
+
+  # The number of baskets this strategy can run at once. A both-directions
+  # strategy can hold a buy side and a sell side simultaneously.
+  def concurrent_directions = direction_both? ? 2 : 1
+
+  # The largest total volume this configuration could ever open, used to warn a
+  # user before their exposure ceiling silently truncates the strategy.
+  def maximum_theoretical_lots
+    # A trailing strategy holds one position per direction, and re-enters only
+    # once the previous one has closed. Its ceiling is the entry size itself.
+    return (initial_lot.to_d * concurrent_directions).round(2) if category_trailing?
+
+    if lot_mode_multiplier? && lot_multiplier.to_d > 1
+      # Geometric series: a(rⁿ − 1) / (r − 1)
+      r = lot_multiplier.to_d
+      (initial_lot.to_d * ((r**grid_levels) - 1) / (r - 1)).round(2)
+    else
+      (initial_lot.to_d * grid_levels).round(2)
+    end
+  end
+
+  class NotVerified < StandardError; end
+  class AlreadyRunning < StandardError; end
+
+  private
+
+  def default_the_trailing_step
+    return if trailing_stop_points.blank? || trailing_step_points.present?
+
+    # Clamped, so a distance tighter than the default step still moves.
+    self.trailing_step_points = [ TRAILING_STEP_DEFAULT_POINTS, trailing_stop_points ].min
+  end
+
+  # An activation or a step with nothing to trail is a setting that does
+  # nothing, which is worse than an error: the user believes they configured an
+  # exit and did not.
+  def trailing_settings_need_a_distance
+    return if trailing_stop_points.present?
+
+    if trailing_activation_points.present?
+      errors.add(:trailing_activation_points, "needs a trailing distance to activate")
+    end
+    if trailing_step_points.present?
+      errors.add(:trailing_step_points, "needs a trailing distance to step through")
+    end
+  end
+
+  # A step wider than the distance itself can never be satisfied, so the stop
+  # would be placed once and then never move again — a fixed stop wearing a
+  # trailing stop's label.
+  def trailing_step_fits_inside_the_distance
+    return if trailing_step_points.blank? || trailing_stop_points.blank?
+    return if trailing_step_points <= trailing_stop_points
+
+    errors.add(:trailing_step_points,
+      "cannot exceed the trailing distance (#{trailing_stop_points} points) — the stop would never move")
+  end
+
+  def grid_levels_within_max_positions
+    return unless category_grid?
+    return if grid_levels.blank? || max_positions.blank?
+    return if grid_levels <= max_positions
+
+    errors.add(:grid_levels,
+      "cannot exceed maximum positions (#{max_positions}) — the grid would be cut short before its last level")
+  end
+
+  def exposure_can_accommodate_the_strategy
+    return if initial_lot.blank? || max_exposure_lots.blank?
+    return if category_grid? && grid_levels.blank?
+    return if category_grid? && lot_mode_multiplier? && lot_multiplier.blank?
+    return if maximum_theoretical_lots <= max_exposure_lots.to_d
+
+    errors.add(:max_exposure_lots, exposure_shortfall_message)
+  end
+
+  def exposure_shortfall_message
+    if category_trailing?
+      "is below what this strategy can open (#{readable_maximum_lots} lots). " \
+      "Raise the ceiling or lower the entry lot size."
+    else
+      "is below what this grid can open (#{readable_maximum_lots} lots). " \
+      "Raise the ceiling, reduce levels, or lower the initial lot size."
+    end
+  end
+
+  # A compounding grid grows geometrically, so a careless multiplier produces a
+  # figure with dozens of digits. Printing that verbatim gives the user a wall
+  # of numerals where they needed a readable quantity, and the message is
+  # already telling them the answer is "far more than your ceiling". Past the
+  # point where the exact total stops meaning anything, say that instead.
+  def readable_maximum_lots
+    total = maximum_theoretical_lots
+
+    if total > DISPLAY_LOT_CEILING
+      "more than #{ActiveSupport::NumberHelper.number_to_delimited(DISPLAY_LOT_CEILING)}"
+    else
+      ActiveSupport::NumberHelper.number_to_delimited(total)
+    end
+  end
+end

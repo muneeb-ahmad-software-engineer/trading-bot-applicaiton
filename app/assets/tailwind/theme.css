@@ -1,0 +1,98 @@
+/*
+ * Design tokens.
+ *
+ * This file is the single source of truth for colour, typography, spacing,
+ * radius and shadow across the entire product. Tailwind v4 generates utilities
+ * directly from these tokens, so `--color-surface-elevated` below is what makes
+ * `bg-surface-elevated`, `text-surface-elevated` and `border-surface-elevated`
+ * exist. Nothing in a template should hard-code a hex value, a shadow or a
+ * radius — if a value is worth reusing, it belongs here.
+ *
+ * The interface is dark-only by design decision, so tokens are defined once.
+ */
+@theme {
+  /* ---------------------------------------------------------------- Colour */
+
+  /* Structural surfaces, from furthest back to closest to the viewer. */
+  --color-background: #0B1120;
+  --color-surface: #111C33;
+  --color-surface-elevated: #16243F;
+  --color-surface-sunken: #080E1A;
+
+  /* Borders. `strong` is for emphasis and focus, not for every edge. */
+  --color-border: #1E2D4A;
+  --color-border-strong: #2A3C5E;
+
+  /* Primary action colour. Restrained gold, tied to the XAUUSD identity.
+     Reserved for primary buttons, active navigation and focus rings — never
+     for large fills, and never for profit/loss figures. */
+  --color-primary: #C9A227;
+  --color-primary-hover: #B8931F;
+  --color-primary-active: #A38119;
+  /* Text/icon colour to place on top of --color-primary. */
+  --color-primary-contrast: #0B1120;
+
+  /* Secondary action colour: a quiet blue-grey for lower-emphasis actions. */
+  --color-secondary: #1E3A5F;
+  --color-secondary-hover: #254875;
+  --color-secondary-contrast: #E2E8F0;
+
+  /* Feedback colours. These describe the state of the *application*. */
+  --color-success: #34D399;
+  --color-warning: #FBBF24;
+  --color-danger: #F87171;
+  --color-info: #60A5FA;
+
+  /* Market colours. These describe the state of the *money*, and are kept
+     deliberately separate from success/danger: restyling a "saved" toast must
+     never silently restyle every profit figure on the dashboard. */
+  --color-profit: #34D399;
+  --color-loss: #F87171;
+  --color-flat: #94A3B8;
+
+  /* Text hierarchy. */
+  --color-text-primary: #F1F5F9;
+  --color-text-secondary: #94A3B8;
+  --color-text-muted: #64748B;
+  --color-text-inverse: #0B1120;
+
+  /* ------------------------------------------------------------ Typography */
+
+  /* System stack: fast, no external request, and no font file for the service
+     worker to cache. Genuinely high quality on every platform we target. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  /* Used for figures, symbols, IDs and anything read character by character. */
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* Semantic sizes layered on top of Tailwind's default scale. */
+  --text-display: 3rem;
+  --text-display--line-height: 1.1;
+  --text-display--letter-spacing: -0.02em;
+
+  /* ---------------------------------------------------------------- Radius */
+
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-card: 0.75rem;
+  --radius-button: 0.5rem;
+  --radius-input: 0.5rem;
+
+  /* --------------------------------------------------------------- Shadows */
+
+  /* Restrained by intent (§6 forbids a flashy look). On a dark interface
+     depth reads better through surface lightness and borders than through
+     heavy drop shadows, so these stay subtle. */
+  --shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.20);
+  --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.28), 0 1px 2px -1px rgb(0 0 0 / 0.24);
+  --shadow-md: 0 4px 12px -2px rgb(0 0 0 / 0.32), 0 2px 6px -2px rgb(0 0 0 / 0.24);
+  --shadow-lg: 0 12px 32px -8px rgb(0 0 0 / 0.44), 0 4px 12px -4px rgb(0 0 0 / 0.28);
+
+  /* --------------------------------------------------------------- Motion */
+
+  /* §6 asks for restrained animation. These are the only two durations used. */
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+}

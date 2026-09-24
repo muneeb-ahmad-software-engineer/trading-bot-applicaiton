@@ -1,0 +1,128 @@
+<%#
+  The live region of the dashboard.
+
+  Replaced wholesale by a Turbo Stream broadcast whenever the terminal reports,
+  so this partial must not depend on anything a controller sets up.
+%>
+<% snapshot = DashboardSnapshot.new(user) %>
+
+<div id="dashboard-live"
+     data-controller="connection-freshness"
+     data-connection-freshness-last-report-value="<%= snapshot.last_report_iso %>"
+     data-connection-freshness-stale-after-value="<%= DashboardSnapshot::STALE_AFTER.to_i %>">
+
+  <%#
+    One warning, not two. The server knows the connection was stale when the
+    page rendered; the browser notices if updates stop afterwards. Both drive
+    the same element, so the user is never told the same thing twice.
+  %>
+  <div class="mb-4<%= " hidden" unless snapshot.connection&.status == :stale %>"
+       data-connection-freshness-target="warning">
+    <%= render "components/alert", variant: :danger,
+               title: "Your terminal has stopped reporting",
+               body: "The figures below are from the last report received and may no longer reflect your account. Positions may have changed. Check that your MT5 terminal is running and connected." %>
+  </div>
+
+  <div class="grid gap-4 md:grid-cols-2">
+    <div class="card">
+      <div class="card-header">
+        <h2 class="heading-4">Connection</h2>
+        <span data-connection-freshness-target="status">
+          <%= render "dashboard/connection_status", connection: snapshot.connection %>
+        </span>
+      </div>
+      <div class="card-body">
+        <% if snapshot.connection&.last_report_at %>
+          <dl class="space-y-3">
+            <div class="flex items-center justify-between gap-4">
+              <dt class="body-sm">Symbol</dt>
+              <dd class="mono text-sm text-text-primary"><%= snapshot.connection.symbol %></dd>
+            </div>
+            <div class="flex items-center justify-between gap-4">
+              <dt class="body-sm">Bid / Ask</dt>
+              <dd class="figure-sm"><%= snapshot.connection.bid || "—" %> / <%= snapshot.connection.ask || "—" %></dd>
+            </div>
+            <div class="flex items-center justify-between gap-4">
+              <dt class="body-sm">Spread (points)</dt>
+              <dd class="figure-sm"><%= snapshot.connection.spread_points_or_derived || "—" %></dd>
+            </div>
+            <div class="flex items-center justify-between gap-4">
+              <dt class="body-sm">Last report</dt>
+              <dd class="body-sm" data-connection-freshness-target="age">
+                <%= time_ago_in_words(snapshot.connection.last_report_at) %> ago
+              </dd>
+            </div>
+          </dl>
+        <% else %>
+          <p class="body-sm">
+            No terminal has reported yet. Issue an API token and configure your Expert
+            Advisor to post to <code class="mono text-primary">/api/v1/trading/report</code>.
+          </p>
+          <div class="mt-4"><%= link_to "Manage API tokens", api_tokens_path, class: "btn btn-outline btn-sm" %></div>
+        <% end %>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><h2 class="heading-4">Account</h2></div>
+      <div class="card-body">
+        <% if snapshot.account %>
+          <div class="grid grid-cols-2 gap-4">
+            <%= render "components/stat", label: "Balance", value: number_with_precision(snapshot.account.balance, precision: 2, delimiter: ",") %>
+            <%= render "components/stat", label: "Equity", value: number_with_precision(snapshot.account.equity, precision: 2, delimiter: ",") %>
+            <%= render "components/stat", label: "Free margin", value: (snapshot.account.free_margin ? number_with_precision(snapshot.account.free_margin, precision: 2, delimiter: ",") : "—") %>
+            <%= render "components/stat", label: "Margin level", value: (snapshot.account.margin_level_percent ? "#{snapshot.account.margin_level_percent}%" : "—") %>
+          </div>
+          <p class="caption mt-4">Reported <%= time_ago_in_words(snapshot.account.recorded_at) %> ago · <%= snapshot.account.currency %></p>
+        <% else %>
+          <p class="body-sm">No account data has been reported yet.</p>
+        <% end %>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mt-4">
+    <div class="card-header">
+      <div>
+        <h2 class="heading-4">Active strategy</h2>
+        <% if snapshot.running %><p class="caption mt-0.5"><%= snapshot.running.name %> · <%= snapshot.running.symbol %></p><% end %>
+      </div>
+      <% if snapshot.running %>
+        <%= render "components/status", state: :running, label: "Running" %>
+      <% end %>
+    </div>
+    <div class="card-body">
+      <% if snapshot.running %>
+        <div class="grid gap-4 sm:grid-cols-3">
+          <%= render "components/stat", label: "Open positions", value: snapshot.positions.size %>
+          <div class="stat">
+            <span class="stat-label">Basket P/L</span>
+            <span class="figure-lg <%= profit_tone(snapshot.basket_profit) %>">
+              <%= snapshot.positions.any? ? signed_money(snapshot.basket_profit) : "—" %>
+              <span class="sr-only"><%= profit_label(snapshot.basket_profit) if snapshot.positions.any? %></span>
+            </span>
+            <% unless snapshot.positions.any? %><span class="caption">No positions reported</span><% end %>
+          </div>
+          <%= render "components/stat", label: "Total volume", value: "#{snapshot.total_volume} lots" %>
+        </div>
+        <div class="mt-4"><%= link_to "View strategy", strategy_path(snapshot.running), class: "btn btn-outline btn-sm" %></div>
+      <% else %>
+        <p class="body-sm">
+          No strategy is running. You have
+          <%= pluralize(snapshot.strategies.size, "strategy", plural: "strategies") %> configured.
+        </p>
+        <div class="mt-4">
+          <%= link_to(snapshot.strategies.any? ? "View strategies" : "Create a strategy",
+                snapshot.strategies.any? ? strategies_path : new_strategy_path, class: "btn btn-outline btn-sm") %>
+        </div>
+      <% end %>
+    </div>
+  </div>
+
+  <% if snapshot.positions.any? %>
+    <div class="mt-4">
+      <%= render "trading/positions_table", positions: snapshot.positions,
+                 caption: "Open positions reported by your terminal" %>
+    </div>
+  <% end %>
+</div>

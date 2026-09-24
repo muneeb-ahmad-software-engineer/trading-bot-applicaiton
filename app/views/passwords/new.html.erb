@@ -1,0 +1,15 @@
+<% content_for :title, "Reset your password · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/auth_shell",
+           locals: { title: "Reset your password",
+                     subtitle: "We'll email you a link to set a new one." } do %>
+  <%= form_with url: passwords_path, method: :post, class: "space-y-4" do |form| %>
+    <div class="field">
+      <%= form.label :email_address, "Email address", class: "label" %>
+      <%= form.email_field :email_address, required: true, autofocus: true,
+            autocomplete: "username", class: "input", placeholder: "you@example.com" %>
+    </div>
+    <%= form.submit "Send reset instructions", class: "btn btn-primary w-full" %>
+  <% end %>
+<% end %>

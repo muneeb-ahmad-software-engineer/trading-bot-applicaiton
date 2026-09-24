@@ -1,0 +1,58 @@
+<%
+  product = Rails.application.config.x.product
+%>
+<footer class="divider mt-20">
+  <div class="container-page py-12">
+    <div class="grid gap-10 md:grid-cols-[2fr_1fr_1fr]">
+      <div>
+        <span class="navbar-brand">
+          <img src="/icon.svg" alt="" width="24" height="24" class="rounded" aria-hidden="true">
+          <%= product.name %>
+        </span>
+        <p class="body-sm mt-3 max-w-sm">
+          A platform for configuring and managing an automated XAUUSD grid strategy.
+          Order execution happens in your own MT5 terminal, through your own broker.
+        </p>
+      </div>
+
+      <div>
+        <h2 class="heading-4 text-sm">Product</h2>
+        <ul class="mt-3 space-y-2">
+          <li><%= link_to "How It Works", "#{root_path}#how-it-works", class: "body-sm inline-block py-1.5 leading-6 hover:text-text-primary" %></li>
+          <li><%= link_to "Features", "#{root_path}#features", class: "body-sm inline-block py-1.5 leading-6 hover:text-text-primary" %></li>
+          <li><%= link_to "Risk Management", "#{root_path}#risk-management", class: "body-sm inline-block py-1.5 leading-6 hover:text-text-primary" %></li>
+          <li><%= link_to "FAQ", "#{root_path}#faq", class: "body-sm inline-block py-1.5 leading-6 hover:text-text-primary" %></li>
+        </ul>
+      </div>
+
+      <div>
+        <h2 class="heading-4 text-sm">Account</h2>
+        <ul class="mt-3 space-y-2">
+          <li><%= link_to "Log In", login_path, class: "body-sm inline-block py-1.5 leading-6 hover:text-text-primary" %></li>
+          <li><%= link_to "Get Started", signup_path, class: "body-sm inline-block py-1.5 leading-6 hover:text-text-primary" %></li>
+        </ul>
+      </div>
+    </div>
+
+    <%#
+      Risk disclosure. This is not boilerplate to be trimmed: the product
+      automates leveraged trading, and the brief is explicit that no language
+      may suggest risk is eliminated.
+    %>
+    <div class="divider mt-10 pt-6">
+      <h2 class="sr-only">Risk disclosure</h2>
+      <p class="caption max-w-3xl">
+        <strong class="text-text-secondary">Risk warning.</strong>
+        Trading leveraged instruments such as XAUUSD carries a substantial risk of loss
+        and is not suitable for everyone. Grid strategies can accumulate multiple open
+        positions and increase exposure as price moves against a basket. The risk
+        controls offered by this platform limit exposure according to the settings you
+        choose; they do not remove the risk of loss. Nothing on this site is financial
+        advice, and no outcome or return is promised.
+      </p>
+      <p class="caption mt-4">
+        &copy; <%= Time.current.year %> <%= product.name %>. Not affiliated with MetaQuotes or any broker.
+      </p>
+    </div>
+  </div>
+</footer>

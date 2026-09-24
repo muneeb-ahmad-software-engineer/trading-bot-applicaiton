@@ -1,0 +1,358 @@
+<% content_for :title, "Design System · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %>
+  <meta name="robots" content="noindex, nofollow">
+<% end %>
+
+<%
+  swatches = {
+    "Surfaces" => %w[background surface surface-elevated surface-sunken],
+    "Borders" => %w[border border-strong],
+    "Brand" => %w[primary primary-hover primary-active secondary secondary-hover],
+    "Feedback" => %w[success warning danger info],
+    "Market" => %w[profit loss flat],
+    "Text" => %w[text-primary text-secondary text-muted]
+  }
+%>
+
+<a href="#main" class="skip-link">Skip to content</a>
+
+<header class="navbar">
+  <div class="navbar-inner">
+    <span class="navbar-brand">
+      <img src="/icon.svg" alt="" width="24" height="24" class="rounded">
+      <%= Rails.application.config.x.product.name %>
+    </span>
+    <span class="badge badge-warning">Design system — development only</span>
+  </div>
+</header>
+
+<main id="main" class="container-page section-tight space-y-16">
+
+  <div>
+    <p class="eyebrow">Global design system</p>
+    <h1 class="heading-1 mt-2">Design tokens &amp; components</h1>
+    <p class="body-lg mt-3 max-w-3xl">
+      Every colour, radius, shadow and component below comes from
+      <code class="mono text-sm text-primary">app/assets/tailwind/</code>. If a page needs a
+      visual pattern that is not on this page, add it here first rather than
+      inventing it in a template.
+    </p>
+  </div>
+
+  <%# ------------------------------------------------------------- Colour %>
+  <section aria-labelledby="colour">
+    <h2 id="colour" class="heading-2">Colour</h2>
+    <div class="mt-6 space-y-8">
+      <% swatches.each do |group, names| %>
+        <div>
+          <h3 class="heading-4 mb-3"><%= group %></h3>
+          <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            <% names.each do |name| %>
+              <div class="card overflow-hidden">
+                <div class="h-14 w-full border-b border-border" style="background-color: var(--color-<%= name %>)"></div>
+                <div class="px-3 py-2">
+                  <p class="text-xs font-medium text-text-primary"><%= name %></p>
+                  <p class="caption mono">--color-<%= name %></p>
+                </div>
+              </div>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+    </div>
+  </section>
+
+  <%# --------------------------------------------------------- Typography %>
+  <section aria-labelledby="type">
+    <h2 id="type" class="heading-2">Typography</h2>
+    <div class="card mt-6">
+      <div class="card-body space-y-5">
+        <div><span class="caption mono">.heading-display</span><p class="heading-display">Automate your XAUUSD strategy</p></div>
+        <div><span class="caption mono">.heading-1</span><p class="heading-1">Strategy configuration</p></div>
+        <div><span class="caption mono">.heading-2</span><p class="heading-2">Risk management</p></div>
+        <div><span class="caption mono">.heading-3</span><p class="heading-3">Grid levels</p></div>
+        <div><span class="caption mono">.heading-4</span><p class="heading-4">Basket take profit</p></div>
+        <div><span class="caption mono">.eyebrow</span><p class="eyebrow">How it works</p></div>
+        <div><span class="caption mono">.body-lg</span><p class="body-lg">Configure your grid parameters and connect your MT5 terminal.</p></div>
+        <div><span class="caption mono">.body</span><p class="body">Configure your grid parameters and connect your MT5 terminal.</p></div>
+        <div><span class="caption mono">.body-sm</span><p class="body-sm">Configure your grid parameters and connect your MT5 terminal.</p></div>
+        <div><span class="caption mono">.label</span><p class="label">Initial lot size</p></div>
+        <div><span class="caption mono">.caption</span><p class="caption">Applies to the next basket only.</p></div>
+      </div>
+    </div>
+
+    <div class="card mt-4">
+      <div class="card-header"><h3 class="heading-4">Financial figures</h3></div>
+      <div class="card-body">
+        <p class="body-sm mb-4">
+          Figures use tabular numerals so digits keep a fixed width. Values that update
+          live must not shift the layout as they change, and columns of numbers must align.
+        </p>
+        <div class="grid gap-4 sm:grid-cols-4">
+          <div class="stat"><span class="stat-label">Current price</span><span class="figure-lg">2,318.45</span></div>
+          <div class="stat"><span class="stat-label">Basket P/L</span><span class="figure-lg figure-profit">+184.20</span></div>
+          <div class="stat"><span class="stat-label">Drawdown</span><span class="figure-lg figure-loss">−62.10</span></div>
+          <div class="stat"><span class="stat-label">Net</span><span class="figure-lg figure-flat">0.00</span></div>
+        </div>
+        <p class="caption mt-4">Example interface values, not real trading results.</p>
+      </div>
+    </div>
+  </section>
+
+  <%# ------------------------------------------------------------ Buttons %>
+  <section aria-labelledby="buttons">
+    <h2 id="buttons" class="heading-2">Buttons</h2>
+    <div class="card mt-6">
+      <div class="card-body space-y-6">
+        <div class="flex flex-wrap items-center gap-3">
+          <button class="btn btn-primary">Get started</button>
+          <button class="btn btn-secondary">Secondary</button>
+          <button class="btn btn-outline">How it works</button>
+          <button class="btn btn-ghost">Cancel</button>
+          <button class="btn btn-danger">Emergency stop</button>
+          <button class="btn btn-primary" disabled>Disabled</button>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <button class="btn btn-primary btn-sm">Small</button>
+          <button class="btn btn-primary">Medium</button>
+          <button class="btn btn-primary btn-lg">Large</button>
+        </div>
+        <div>
+          <p class="caption mb-2">Rendered through the shared partial</p>
+          <div class="flex flex-wrap gap-3">
+            <%= render "components/button", label: "Primary partial", variant: :primary %>
+            <%= render "components/button", label: "Outline partial", variant: :outline, size: :sm %>
+            <%= render "components/button", label: "Link styled as button", variant: :secondary, href: design_system_path %>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <%# -------------------------------------------------------------- Forms %>
+  <section aria-labelledby="forms">
+    <h2 id="forms" class="heading-2">Form controls</h2>
+    <div class="card mt-6">
+      <div class="card-body">
+        <fieldset class="form-section">
+          <legend class="heading-4">Grid configuration</legend>
+          <p class="form-section-description">Example of a titled group of related fields.</p>
+          <div class="form-section-body">
+            <%= render "components/field", name: "strategy_name", label: "Strategy name",
+                       value: "Gold grid — conservative", placeholder: "e.g. Gold grid" %>
+            <%= render "components/field", name: "grid_spacing", label: "Grid spacing", type: "number",
+                       numeric: true, value: "150", hint: "Distance between levels, in points.", required: true %>
+            <%= render "components/field", name: "initial_lot", label: "Initial lot size", type: "number",
+                       numeric: true, value: "0.01", step: "0.01", min: "0.01" %>
+            <%= render "components/field", name: "max_positions", label: "Maximum positions", type: "number",
+                       numeric: true, value: "0", error: "Must be greater than zero." %>
+            <%= render "components/field", name: "direction", label: "Order direction", type: :select do %>
+              <option>Both</option><option>Buy only</option><option>Sell only</option>
+            <% end %>
+            <%= render "components/field", name: "notes", label: "Notes", type: :textarea,
+                       placeholder: "Optional", class: "field-wide" %>
+          </div>
+        </fieldset>
+
+        <div class="divider my-6"></div>
+
+        <div class="grid gap-3 sm:grid-cols-2">
+          <div class="choice">
+            <input type="checkbox" id="ds_check" class="checkbox" checked>
+            <label for="ds_check" class="choice-label">Enable drawdown protection</label>
+          </div>
+          <div class="choice">
+            <input type="checkbox" id="ds_check2" class="checkbox">
+            <label for="ds_check2" class="choice-label">Enable margin protection</label>
+          </div>
+          <div class="choice">
+            <input type="radio" name="ds_radio" id="ds_r1" class="radio" checked>
+            <label for="ds_r1" class="choice-label">Fixed lot sizing</label>
+          </div>
+          <div class="choice">
+            <input type="radio" name="ds_radio" id="ds_r2" class="radio">
+            <label for="ds_r2" class="choice-label">Multiplier lot sizing</label>
+          </div>
+          <div class="choice">
+            <input type="checkbox" id="ds_check3" class="checkbox" disabled>
+            <label for="ds_check3" class="choice-label text-text-muted">Disabled option</label>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <%# ----------------------------------------------------------- Feedback %>
+  <section aria-labelledby="feedback">
+    <h2 id="feedback" class="heading-2">Badges, alerts &amp; status</h2>
+
+    <div class="card mt-6">
+      <div class="card-body space-y-6">
+        <div class="flex flex-wrap gap-2">
+          <%= render "components/badge", label: "Neutral", variant: :neutral %>
+          <%= render "components/badge", label: "XAUUSD", variant: :primary %>
+          <%= render "components/badge", label: "Connected", variant: :success %>
+          <%= render "components/badge", label: "High spread", variant: :warning %>
+          <%= render "components/badge", label: "Disconnected", variant: :danger %>
+          <%= render "components/badge", label: "Info", variant: :info %>
+        </div>
+
+        <div class="flex flex-wrap gap-6">
+          <%= render "components/status", state: :live, label: "Bot running" %>
+          <%= render "components/status", state: :running, label: "Connected" %>
+          <%= render "components/status", state: :stopped, label: "Bot stopped" %>
+          <%= render "components/status", state: :warning, label: "Spread above limit" %>
+          <%= render "components/status", state: :error, label: "MT5 disconnected" %>
+        </div>
+
+        <div class="space-y-3">
+          <%= render "components/alert", variant: :info, title: "Configuration saved",
+                     body: "Changes apply to the next basket, not to open positions." %>
+          <%= render "components/alert", variant: :success, title: "MT5 terminal connected",
+                     body: "Your Expert Advisor is reporting normally." %>
+          <%= render "components/alert", variant: :warning, title: "Spread above your limit",
+                     body: "New grid orders are paused until the spread returns below the configured maximum." %>
+          <%= render "components/alert", variant: :danger, title: "Trading involves risk",
+                     body: "Risk controls limit exposure according to your configuration. They do not eliminate the risk of loss." %>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <%# -------------------------------------------------------------- Cards %>
+  <section aria-labelledby="cards">
+    <h2 id="cards" class="heading-2">Cards &amp; stats</h2>
+    <div class="mt-6 grid gap-4 md:grid-cols-3">
+      <%= render "components/card", heading_level: "h3", title: "Standard card", subtitle: "With header and body",
+                 body: "Separation on a dark interface comes from surface lightness and a border rather than a heavy shadow." %>
+      <div class="card-elevated">
+        <div class="card-body">
+          <p class="heading-4">Elevated card</p>
+          <p class="body-sm mt-2">Raised surface for content that sits above the page.</p>
+        </div>
+      </div>
+      <div class="card-interactive">
+        <div class="card-body">
+          <p class="heading-4">Interactive card</p>
+          <p class="body-sm mt-2">Hover to see the state change. Used for linked list items.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div class="card"><div class="card-body"><%= render "components/stat", label: "Open positions", value: "6" %></div></div>
+      <div class="card"><div class="card-body"><%= render "components/stat", label: "Basket P/L", value: "+184.20", tone: :profit, hint: "Example value" %></div></div>
+      <div class="card"><div class="card-body"><%= render "components/stat", label: "Drawdown", value: "−62.10", tone: :loss, hint: "Example value" %></div></div>
+      <div class="card"><div class="card-body"><%= render "components/stat", label: "Pending orders", value: "0", tone: :flat %></div></div>
+    </div>
+  </section>
+
+  <%# ------------------------------------------------------------- Tables %>
+  <section aria-labelledby="tables">
+    <h2 id="tables" class="heading-2">Tables</h2>
+    <p class="body-sm mt-2">Wide tables scroll inside their own container so the page never scrolls sideways on a phone.</p>
+    <div class="table-wrap mt-6">
+      <table class="table">
+        <caption class="sr-only">Example positions table using placeholder values</caption>
+        <thead>
+          <tr>
+            <th scope="col">Symbol</th><th scope="col">Direction</th>
+            <th scope="col" class="col-numeric">Lots</th>
+            <th scope="col" class="col-numeric">Open price</th>
+            <th scope="col" class="col-numeric">P/L</th>
+            <th scope="col">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono text-text-primary">XAUUSD</td><td>Buy</td>
+            <td class="col-numeric">0.01</td><td class="col-numeric">2,310.20</td>
+            <td class="col-numeric figure-profit">+18.40</td>
+            <td><%= render "components/badge", label: "Open", variant: :success %></td>
+          </tr>
+          <tr>
+            <td class="mono text-text-primary">XAUUSD</td><td>Buy</td>
+            <td class="col-numeric">0.02</td><td class="col-numeric">2,295.80</td>
+            <td class="col-numeric figure-loss">−9.15</td>
+            <td><%= render "components/badge", label: "Open", variant: :success %></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="caption mt-2">Placeholder rows for interface development. Not real trading results.</p>
+
+    <div class="table-wrap mt-4">
+      <table class="table">
+        <thead><tr><th scope="col">Symbol</th><th scope="col">Direction</th><th scope="col">Status</th></tr></thead>
+        <tbody><tr><td colspan="3" class="table-empty">No positions yet.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <%# -------------------------------------------------------------- Modal %>
+  <section aria-labelledby="modals">
+    <h2 id="modals" class="heading-2">Modal</h2>
+    <p class="body-sm mt-2">
+      Built on the native <code class="mono text-primary">&lt;dialog&gt;</code> element, so focus
+      trapping, Escape-to-close and page inertness come from the browser.
+    </p>
+    <button class="btn btn-outline mt-4" onclick="document.getElementById('ds_modal').showModal()">
+      Open example modal
+    </button>
+    <dialog id="ds_modal" class="modal" aria-labelledby="ds_modal_title">
+      <div class="modal-header">
+        <h3 id="ds_modal_title" class="heading-4">Stop this strategy?</h3>
+        <button class="modal-close" aria-label="Close" onclick="document.getElementById('ds_modal').close()">✕</button>
+      </div>
+      <div class="modal-body">
+        Stopping halts new grid orders. Positions already open with your broker are not
+        closed by this action.
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="document.getElementById('ds_modal').close()">Cancel</button>
+        <button class="btn btn-danger" onclick="document.getElementById('ds_modal').close()">Stop strategy</button>
+      </div>
+    </dialog>
+  </section>
+
+  <%# ------------------------------------------------- Radius and shadows %>
+  <section aria-labelledby="tokens">
+    <h2 id="tokens" class="heading-2">Radius &amp; elevation</h2>
+    <div class="mt-6 grid gap-4 sm:grid-cols-2">
+      <div class="card">
+        <div class="card-body">
+          <h3 class="heading-4 mb-4">Radius</h3>
+          <div class="flex flex-wrap gap-4">
+            <% %w[sm md lg card button].each do |r| %>
+              <div class="text-center">
+                <div class="size-16 border border-border-strong bg-surface-elevated" style="border-radius: var(--radius-<%= r %>)"></div>
+                <p class="caption mono mt-1"><%= r %></p>
+              </div>
+            <% end %>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-body">
+          <h3 class="heading-4 mb-4">Shadows</h3>
+          <div class="flex flex-wrap gap-4">
+            <% %w[xs sm md lg].each do |sh| %>
+              <div class="text-center">
+                <div class="size-16 rounded-lg bg-surface-elevated" style="box-shadow: var(--shadow-<%= sh %>)"></div>
+                <p class="caption mono mt-1"><%= sh %></p>
+              </div>
+            <% end %>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="divider mt-16">
+  <div class="container-page py-8">
+    <p class="caption">
+      Development-only style guide. All figures shown are interface examples, not trading results.
+    </p>
+  </div>
+</footer>

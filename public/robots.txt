@@ -1,0 +1,12 @@
+# See https://www.robotstxt.org/robotstxt.html for documentation
+
+User-agent: *
+Allow: /
+
+# Application surfaces that hold no public content.
+Disallow: /dashboard
+Disallow: /strategies
+Disallow: /settings
+Disallow: /profile
+Disallow: /offline
+Disallow: /api/

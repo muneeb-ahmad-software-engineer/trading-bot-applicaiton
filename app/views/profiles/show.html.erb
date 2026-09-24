@@ -1,0 +1,21 @@
+<% content_for :title, "Profile · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/app_shell", locals: { title: "Profile" } do %>
+  <%= render "components/card", title: "Your details", body: capture { %>
+    <dl class="space-y-3">
+      <div class="flex items-center justify-between gap-4">
+        <dt class="body-sm">Email address</dt>
+        <dd class="mono text-sm text-text-primary"><%= current_user.email_address %></dd>
+      </div>
+      <div class="flex items-center justify-between gap-4">
+        <dt class="body-sm">Email verified</dt>
+        <dd class="body-sm"><%= current_user.verified? ? current_user.verified_at.to_fs(:long) : "Not yet verified" %></dd>
+      </div>
+      <div class="flex items-center justify-between gap-4">
+        <dt class="body-sm">Account created</dt>
+        <dd class="body-sm"><%= current_user.created_at.to_fs(:long) %></dd>
+      </div>
+    </dl>
+  <% } %>
+<% end %>

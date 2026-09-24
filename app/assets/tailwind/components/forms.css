@@ -1,0 +1,154 @@
+/*
+ * Form controls: inputs, selects, textareas, checkboxes, radios and the
+ * structure that groups them. Strategy configuration is the heart of this
+ * product, so these carry more weight than usual.
+ */
+@layer components {
+  .input,
+  .input-numeric,
+  .select,
+  .textarea {
+    @apply block w-full rounded-input border border-border bg-surface-sunken
+           px-3 py-2.5 text-sm text-text-primary;
+    transition-property: border-color, background-color;
+    transition-duration: var(--duration-fast);
+  }
+
+  .input::placeholder,
+  .input-numeric::placeholder,
+  .textarea::placeholder {
+    @apply text-text-muted;
+  }
+
+  .input:hover:not(:disabled),
+  .input-numeric:hover:not(:disabled),
+  .select:hover:not(:disabled),
+  .textarea:hover:not(:disabled) {
+    @apply border-border-strong;
+  }
+
+  .input:disabled,
+  .input-numeric:disabled,
+  .select:disabled,
+  .textarea:disabled {
+    @apply cursor-not-allowed opacity-50;
+  }
+
+  /* Numeric inputs — lot sizes, grid spacing, price levels. Aligned right and
+     tabular so a column of configured values reads cleanly. */
+  .input-numeric {
+    @apply text-right tabular-nums;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .select {
+    @apply cursor-pointer appearance-none bg-no-repeat pr-10;
+    /* Chevron drawn inline so no image request is needed. */
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%2394A3B8'%3E%3Cpath fill-rule='evenodd' d='M5.23 7.21a.75.75 0 011.06.02L10 11.17l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z' clip-rule='evenodd'/%3E%3C/svg%3E");
+    background-position: right 0.65rem center;
+    background-size: 1.15rem 1.15rem;
+  }
+
+  .textarea {
+    @apply min-h-24 resize-y;
+  }
+
+  /* Invalid state. Paired with aria-invalid on the control itself so the
+     styling and the accessibility signal can never drift apart. */
+  .input[aria-invalid="true"],
+  .input-numeric[aria-invalid="true"],
+  .select[aria-invalid="true"],
+  .textarea[aria-invalid="true"] {
+    @apply border-danger;
+  }
+
+  /* ------------------------------------------------- Checkboxes and radios */
+
+  .checkbox,
+  .radio {
+    @apply size-4 shrink-0 cursor-pointer appearance-none border border-border-strong
+           bg-surface-sunken;
+    transition-property: background-color, border-color;
+    transition-duration: var(--duration-fast);
+  }
+
+  .checkbox {
+    @apply rounded-sm;
+  }
+
+  .radio {
+    @apply rounded-full;
+  }
+
+  .checkbox:checked,
+  .radio:checked {
+    @apply border-primary bg-primary;
+  }
+
+  .checkbox:checked {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%230B1120'%3E%3Cpath d='M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0l-2-2a1 1 0 111.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z'/%3E%3C/svg%3E");
+    @apply bg-contain bg-center bg-no-repeat;
+  }
+
+  .radio:checked {
+    /* Inner dot via a ring rather than a pseudo-element. */
+    box-shadow: inset 0 0 0 3px var(--color-surface-sunken);
+  }
+
+  .checkbox:disabled,
+  .radio:disabled {
+    @apply cursor-not-allowed opacity-50;
+  }
+
+  /* Enlarges a bare checkbox or radio's tap target to the 24px minimum without
+     changing how big the control looks. A 16px box is comfortable to click with
+     a mouse and difficult to hit with a thumb. */
+  .choice-target {
+    @apply inline-flex cursor-pointer items-center justify-center p-2;
+  }
+
+  /* A control with its label and optional hint, laid out on one row. */
+  .choice {
+    @apply flex items-start gap-3;
+  }
+
+  .choice-label {
+    @apply cursor-pointer text-sm text-text-primary;
+  }
+
+  /* ------------------------------------------------------------ Structure */
+
+  /* One field: label, control, hint and/or error. */
+  .field {
+    @apply flex flex-col gap-1.5;
+  }
+
+  .field-hint {
+    @apply text-xs text-text-muted;
+  }
+
+  .field-error {
+    @apply text-xs font-medium text-danger;
+  }
+
+  /* A titled group of related fields, e.g. "Risk Management". Rendered as a
+     fieldset so the group has a real accessible name. */
+  .form-section {
+    @apply border-0 p-0;
+  }
+
+  /* Section titles use .heading-4 directly — see components/typography.css. */
+
+  .form-section-description {
+    @apply mt-1 text-sm text-text-secondary;
+  }
+
+  .form-section-body {
+    @apply mt-4 grid gap-4 sm:grid-cols-2;
+  }
+
+  /* Makes a field span the full width of a .form-section-body grid. */
+  .field-wide {
+    @apply sm:col-span-2;
+  }
+}

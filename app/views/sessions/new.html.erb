@@ -1,0 +1,26 @@
+<% content_for :title, "Log in · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/auth_shell",
+           locals: { title: "Log in",
+                     subtitle: "Access your strategy configuration and account.",
+                     aside: capture { concat "No account yet? "; concat link_to("Create one", signup_path, class: "text-primary hover:underline") } } do %>
+  <%= form_with url: login_path, method: :post, class: "space-y-4" do |form| %>
+    <div class="field">
+      <%= form.label :email_address, "Email address", class: "label" %>
+      <%= form.email_field :email_address, required: true, autofocus: true,
+            autocomplete: "username", class: "input", placeholder: "you@example.com" %>
+    </div>
+
+    <div class="field">
+      <%= form.label :password, "Password", class: "label" %>
+      <%= form.password_field :password, required: true,
+            autocomplete: "current-password", class: "input" %>
+      <p class="field-hint">
+        <%= link_to "Forgot your password?", new_password_path, class: "inline-block py-1.5 leading-6 hover:text-text-secondary" %>
+      </p>
+    </div>
+
+    <%= form.submit "Log in", class: "btn btn-primary w-full" %>
+  <% end %>
+<% end %>

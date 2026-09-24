@@ -1,0 +1,44 @@
+<% content_for :title, "Alerts · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<% actions = link_to "Notification settings", notification_settings_path, class: "btn btn-outline btn-sm" %>
+
+<%= render layout: "shared/app_shell",
+           locals: { title: "Alerts", subtitle: "Things that needed your attention.", actions: } do %>
+  <% if @notifications.any? %>
+    <div class="space-y-3">
+      <% @notifications.each do |notification| %>
+        <div class="card">
+          <div class="card-body">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                  <%= render "components/badge",
+                             label: notification.severity,
+                             variant: (notification.severity == "critical" ? :danger :
+                                       notification.severity == "warning" ? :warning : :info) %>
+                  <h2 class="heading-4"><%= notification.title %></h2>
+                  <% if notification.resolved_at %>
+                    <%= render "components/badge", label: "Resolved", variant: :success %>
+                  <% end %>
+                </div>
+                <p class="body-sm mt-2"><%= notification.body %></p>
+              </div>
+              <span class="caption whitespace-nowrap"><%= time_ago_in_words(notification.created_at) %> ago</span>
+            </div>
+          </div>
+        </div>
+      <% end %>
+    </div>
+  <% else %>
+    <div class="card">
+      <div class="card-body py-16 text-center">
+        <h2 class="heading-3">No alerts</h2>
+        <p class="body mx-auto mt-2 max-w-md">
+          You'll be told here — and by email — if your terminal stops reporting or a
+          risk limit is reached.
+        </p>
+      </div>
+    </div>
+  <% end %>
+<% end %>

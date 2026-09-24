@@ -1,0 +1,135 @@
+<% content_for :title, "Settings · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/app_shell",
+           locals: { title: "Settings", subtitle: "Account security and connected clients." } do %>
+  <div class="space-y-4">
+    <%= render "components/card", title: "Security", body: capture { %>
+      <div class="space-y-4">
+        <p class="body-sm">
+          Changing your password signs you out of every device and revokes every API
+          token, including a connected MT5 terminal.
+        </p>
+        <%= link_to "Change password", new_password_path, class: "btn btn-outline btn-sm" %>
+      </div>
+    <% } %>
+
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <h2 class="heading-4">Two-factor authentication</h2>
+          <p class="caption mt-0.5">A second step when logging in.</p>
+        </div>
+        <% if current_user.otp_enabled? %>
+          <%= render "components/badge", label: "On", variant: :success %>
+        <% else %>
+          <%= render "components/badge", label: "Off", variant: :warning %>
+        <% end %>
+      </div>
+      <div class="card-body">
+        <% if current_user.otp_enabled? %>
+          <p class="body-sm">
+            Enabled <%= current_user.otp_enabled_at.to_fs(:long) %>. You have
+            <%= pluralize(current_user.recovery_codes.unused.count, "unused recovery code") %>.
+          </p>
+          <div class="mt-4 flex flex-wrap gap-2">
+            <%= button_to "Regenerate recovery codes", recovery_codes_path, method: :post,
+                  class: "btn btn-outline btn-sm",
+                  form: { data: { turbo_confirm: "Generate a new set? Your existing recovery codes will stop working." } } %>
+            <%= button_to "Turn off", settings_two_factor_path, method: :delete,
+                  class: "btn btn-ghost btn-sm text-danger",
+                  form: { data: { turbo_confirm: "Turn off two-factor authentication? Your account will be protected by password alone, and an API token can place trades." } } %>
+          </div>
+        <% else %>
+          <p class="body-sm">
+            Without it, your password is the only thing protecting an account that can
+            issue API tokens capable of placing trades.
+          </p>
+          <div class="mt-4">
+            <%= link_to "Set up two-factor authentication", new_two_factor_settings_path, class: "btn btn-primary btn-sm" %>
+          </div>
+        <% end %>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <h2 class="heading-4">Broker account</h2>
+          <p class="caption mt-0.5">The MT5 account your terminal signs in to.</p>
+        </div>
+        <% if (credential = current_user.broker_credential) %>
+          <span class="flex items-center gap-2">
+            <% if credential.last_verification_error.present? %>
+              <%= render "components/badge", label: "Not working", variant: :danger %>
+            <% elsif credential.verified? %>
+              <%= render "components/badge", label: "Verified", variant: :success %>
+            <% end %>
+            <%= render "components/badge", label: credential.live? ? "Live" : "Demo",
+                       variant: credential.live? ? :warning : :info %>
+          </span>
+        <% else %>
+          <%= render "components/badge", label: "Not set", variant: :neutral %>
+        <% end %>
+      </div>
+      <div class="card-body">
+        <p class="body-sm">
+          <% if current_user.broker_credential %>
+            Connected to <%= current_user.broker_credential.server %>. A terminal is started
+            for you whenever you start a strategy.
+          <% else %>
+            Without broker details the platform cannot run a terminal for you. You can still
+            run MetaTrader yourself and connect it with an API token.
+          <% end %>
+        </p>
+        <div class="mt-4">
+          <%= link_to current_user.broker_credential ? "Manage broker account" : "Add broker account",
+                edit_broker_credential_path, class: "btn btn-outline btn-sm" %>
+        </div>
+      </div>
+    </div>
+
+    <%= render "components/card", title: "API tokens",
+               subtitle: "For your MT5 terminal and mobile devices", body: capture { %>
+      <%= link_to "Manage API tokens", api_tokens_path, class: "btn btn-outline btn-sm" %>
+    <% } %>
+
+    <%= render "components/card", title: "Notifications",
+               subtitle: "Alerts by email and push",
+               body: capture { link_to "Notification settings", notification_settings_path, class: "btn btn-outline btn-sm" } %>
+
+    <%= render "components/card", title: "Account activity",
+               subtitle: "Sign-ins, strategy changes and security events",
+               body: capture { link_to "View activity", activity_path, class: "btn btn-outline btn-sm" } %>
+
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <h2 class="heading-4">Active sessions</h2>
+          <p class="caption mt-0.5">Browsers currently signed in to your account.</p>
+        </div>
+      </div>
+      <div class="table-wrap rounded-none border-x-0 border-b-0">
+        <table class="table">
+          <caption class="sr-only">Browser sessions signed in to your account</caption>
+          <thead>
+            <tr>
+              <th scope="col">Signed in</th>
+              <th scope="col">IP address</th>
+              <th scope="col">Browser</th>
+            </tr>
+          </thead>
+          <tbody>
+            <% @sessions.each do |session| %>
+              <tr>
+                <td class="figure-sm"><%= session.created_at.to_fs(:long) %></td>
+                <td class="mono"><%= session.ip_address %></td>
+                <td class="max-w-xs truncate"><%= session.user_agent %></td>
+              </tr>
+            <% end %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+<% end %>

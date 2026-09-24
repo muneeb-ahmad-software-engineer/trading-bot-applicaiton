@@ -1,0 +1,59 @@
+<%#
+  Open or closed positions.
+
+  Shared by the dashboard, the strategy page and the history page so the same
+  data is never formatted three different ways.
+
+  `closed` switches the columns between a live view (current price) and a
+  historical one (close price, closed at).
+%>
+<%
+  closed = local_assigns.fetch(:closed, false)
+  show_strategy = local_assigns.fetch(:show_strategy, false)
+%>
+<div class="table-wrap">
+  <table class="table">
+    <caption class="sr-only"><%= local_assigns.fetch(:caption, "Positions") %></caption>
+    <thead>
+      <tr>
+        <th scope="col">Ticket</th>
+        <% if show_strategy %><th scope="col">Strategy</th><% end %>
+        <th scope="col">Level</th>
+        <th scope="col">Direction</th>
+        <th scope="col" class="col-numeric">Lots</th>
+        <th scope="col" class="col-numeric">Open</th>
+        <th scope="col" class="col-numeric"><%= closed ? "Close" : "Current" %></th>
+        <%# Only on the live view: a closed position's stop is history, and the
+            price it actually closed at is already in the column before this. %>
+        <% unless closed %><th scope="col" class="col-numeric">Stop</th><% end %>
+        <th scope="col" class="col-numeric">Net P/L</th>
+        <th scope="col"><%= closed ? "Closed" : "Opened" %></th>
+      </tr>
+    </thead>
+    <tbody>
+      <% positions.each do |position| %>
+        <tr>
+          <td class="mono"><%= position.ticket %></td>
+          <% if show_strategy %>
+            <td class="max-w-[12rem] truncate"><%= position.strategy.name %></td>
+          <% end %>
+          <td class="mono"><%= position.grid_level || "—" %></td>
+          <td><%= position.direction.capitalize %></td>
+          <td class="col-numeric"><%= position.volume %></td>
+          <td class="col-numeric"><%= position.open_price %></td>
+          <td class="col-numeric"><%= (closed ? position.close_price : position.current_price) || "—" %></td>
+          <% unless closed %>
+            <td class="col-numeric"><%= position.stop_loss || "—" %></td>
+          <% end %>
+          <td class="col-numeric <%= profit_tone(position.net_profit) %>">
+            <%= signed_money(position.net_profit) %>
+            <span class="sr-only"><%= profit_label(position.net_profit) %></span>
+          </td>
+          <td class="figure-sm whitespace-nowrap">
+            <%= (closed ? position.closed_at : position.opened_at)&.to_fs(:long) %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</div>

@@ -1,0 +1,21 @@
+<%#
+  Inline alert.
+
+  variant: :info | :success | :warning | :danger
+
+  Danger and warning alerts get role="alert" so assistive technology announces
+  them; informational ones do not, to avoid interrupting the user for content
+  that is merely present on the page.
+%>
+<%
+  variant ||= :info
+  role = %i[danger warning].include?(variant.to_sym) ? "alert" : "status"
+%>
+<div class="alert alert-<%= variant %> <%= local_assigns[:class] %>" role="<%= role %>">
+  <div>
+    <% if local_assigns[:title].present? %>
+      <p class="alert-title"><%= title %></p>
+    <% end %>
+    <div class="alert-body"><%= local_assigns[:body] %></div>
+  </div>
+</div>

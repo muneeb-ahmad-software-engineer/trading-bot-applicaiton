@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# One-line view of what the platform believes right now. Used constantly while
+# verifying against a live terminal.
+cd "$(dirname "$0")/.."
+bin/rails runner -e development '
+c = TerminalConnection.last; s = Strategy.find(1); a = AccountState.last
+puts "strategy=#{s.status} spacing=#{s.grid_spacing_points} levels=#{s.grid_levels} maxpos=#{s.max_positions} " \
+     "maxexp=#{s.max_exposure_lots} maxspread=#{s.max_spread_points} tp=#{s.basket_take_profit.inspect} sl=#{s.basket_stop_loss.inspect}"
+puts "terminal=#{c&.status} spread=#{c&.spread_points_or_derived} bid=#{c&.bid} equity=#{a&.equity}"
+puts "open=#{Position.open.count} closed=#{Position.closed.count} floating=#{format("%+.2f", Position.open.sum(&:net_profit))} realised=#{format("%+.2f", Position.closed.sum(&:net_profit))}"
+Position.open.each { |p| puts "  OPEN  #{p.direction.upcase.ljust(4)} L#{p.grid_level} #{p.volume} @#{p.open_price} now #{p.current_price} #{format("%+.2f", p.net_profit)}" }
+Position.closed.order(:closed_at).last(6).each { |p| puts "  CLOSED #{p.direction.upcase.ljust(4)} L#{p.grid_level} #{p.volume} @#{p.open_price} -> #{p.close_price} #{format("%+.2f", p.net_profit)}" }
+' 2>/dev/null | grep -v "^$"

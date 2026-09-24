@@ -1,0 +1,63 @@
+<%#
+  Security and reliability.
+
+  Every claim below corresponds to something actually implemented and covered by
+  a test. When a protection does not exist yet, it is described as design intent
+  and labelled as such — §7 forbids claiming security that is not built, and on
+  a financial product a false claim here is the most damaging kind.
+
+  If you add a bullet, add the test that proves it first.
+%>
+<%
+  # Implemented and tested.
+  implemented = [
+    { name: "Password-based accounts",
+      body: "Passwords are stored as bcrypt digests, never in plain text, and a minimum length is enforced. Sign-in failures do not reveal whether an address is registered." },
+    { name: "Revocable sessions and API tokens",
+      body: "Browser sessions and API tokens are stored server-side and can be revoked individually. Resetting your password signs out every device and disconnects every API client." },
+    { name: "Token-authenticated API",
+      body: "API access uses bearer tokens stored only as hashes, so the database never holds a usable credential. Tokens are scoped to one account and stop working the moment they are revoked." },
+    { name: "Two-factor authentication",
+      body: "Accounts can require a time-based code from an authenticator app in addition to a password. Codes are single-use, the shared secret is encrypted at rest, and single-use recovery codes cover a lost device." },
+    { name: "Re-authentication for sensitive actions",
+      body: "Issuing an API token or turning off two-factor requires confirming your password again, so an unattended logged-in browser cannot be used to hand out a trading credential." },
+    { name: "Rate-limited authentication",
+      body: "Sign-in, sign-up and password-reset requests are rate limited to slow down automated credential guessing." },
+    { name: "Verified email before trading actions",
+      body: "You can explore and configure freely, but issuing an API token — the credential that lets a terminal trade — requires a confirmed email address." },
+    { name: "Separation of control and execution",
+      body: "Order execution stays in your own MT5 terminal with your own broker. This platform never holds your trading funds or your broker credentials." }
+  ]
+
+  # Not built yet. Listed so the section describes the whole picture honestly
+  # rather than implying the work is finished.
+  planned = [
+    "MT5 terminal connectivity",
+    "per-strategy authorisation controls"
+  ]
+%>
+<section class="section scroll-mt-16" aria-labelledby="security-heading">
+  <div class="container-page">
+    <div class="section-header">
+      <p class="eyebrow">Security &amp; reliability</p>
+      <h2 id="security-heading" class="heading-2 mt-2">Account security</h2>
+    </div>
+
+    <div class="mt-8 grid gap-4 sm:grid-cols-2">
+      <% implemented.each do |principle| %>
+        <div class="card">
+          <div class="card-body">
+            <h3 class="heading-4"><%= principle[:name] %></h3>
+            <p class="body-sm mt-2"><%= principle[:body] %></p>
+          </div>
+        </div>
+      <% end %>
+    </div>
+
+    <div class="mx-auto mt-8 max-w-3xl">
+      <%= render "components/alert", variant: :info,
+                 title: "Not built yet",
+                 body: "#{planned.to_sentence.upcase_first}. These are on the roadmap and are listed here so this section describes the current state rather than an intended one." %>
+    </div>
+  </div>
+</section>

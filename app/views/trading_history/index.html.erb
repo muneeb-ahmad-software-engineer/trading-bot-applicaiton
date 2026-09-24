@@ -1,0 +1,106 @@
+<% content_for :title, "Trading history · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/app_shell",
+           locals: { title: "Trading history",
+                     subtitle: "Positions your terminal reported as closed." } do %>
+
+  <%# Filters sit in one row above the results. %>
+  <div class="card">
+    <div class="card-body">
+      <%= form_with url: trading_history_path, method: :get, class: "grid gap-4 sm:grid-cols-2 lg:grid-cols-5 lg:items-end" do |form| %>
+        <div class="field">
+          <%= form.label :strategy_id, "Strategy", class: "label" %>
+          <%= form.select :strategy_id,
+                options_for_select(@strategies.map { |s| [ s.name, s.id ] }, @filter[:strategy_id]),
+                { include_blank: "All strategies" }, class: "select" %>
+        </div>
+
+        <div class="field">
+          <%= form.label :direction, "Direction", class: "label" %>
+          <%= form.select :direction,
+                options_for_select([ %w[Buy buy], %w[Sell sell] ], @filter[:direction]),
+                { include_blank: "Both" }, class: "select" %>
+        </div>
+
+        <div class="field">
+          <%= form.label :from, "From", class: "label" %>
+          <%= form.date_field :from, value: @filter[:from], class: "input" %>
+        </div>
+
+        <div class="field">
+          <%= form.label :to, "To", class: "label" %>
+          <%= form.date_field :to, value: @filter[:to], class: "input" %>
+        </div>
+
+        <div class="flex gap-2">
+          <%= form.submit "Apply", class: "btn btn-primary" %>
+          <%= link_to "Clear", trading_history_path, class: "btn btn-ghost" %>
+        </div>
+      <% end %>
+    </div>
+  </div>
+
+  <%# Summary of the filtered set, not of the visible page. %>
+  <div class="mt-4 grid gap-4 sm:grid-cols-3">
+    <div class="card"><div class="card-body">
+      <%= render "components/stat", label: "Closed positions", value: @closed_count %>
+    </div></div>
+    <div class="card"><div class="card-body">
+      <div class="stat">
+        <span class="stat-label">Realised P/L</span>
+        <span class="figure-lg <%= profit_tone(@realised_profit) %>">
+          <%= signed_money(@realised_profit) %>
+          <span class="sr-only"><%= profit_label(@realised_profit) %></span>
+        </span>
+        <span class="caption">Net of swap and commission</span>
+      </div>
+    </div></div>
+    <div class="card"><div class="card-body">
+      <%= render "components/stat", label: "Showing",
+                 value: "#{@positions.size} of #{@total}",
+                 hint: "Page #{@page} of #{@pages}" %>
+    </div></div>
+  </div>
+
+  <div class="mt-4">
+    <% if @positions.any? %>
+      <%= render "trading/positions_table", positions: @positions, closed: true,
+                 show_strategy: @filter[:strategy_id].blank?,
+                 caption: "Closed positions" %>
+
+      <% if @pages > 1 %>
+        <nav class="mt-4 flex items-center justify-between" aria-label="Trading history pages">
+          <% if @page > 1 %>
+            <%= link_to "← Previous", trading_history_path(request.query_parameters.merge(page: @page - 1)),
+                  class: "btn btn-outline btn-sm" %>
+          <% else %>
+            <span></span>
+          <% end %>
+
+          <span class="caption">Page <%= @page %> of <%= @pages %></span>
+
+          <% if @page < @pages %>
+            <%= link_to "Next →", trading_history_path(request.query_parameters.merge(page: @page + 1)),
+                  class: "btn btn-outline btn-sm" %>
+          <% else %>
+            <span></span>
+          <% end %>
+        </nav>
+      <% end %>
+    <% else %>
+      <div class="card">
+        <div class="card-body py-16 text-center">
+          <h2 class="heading-3">No closed positions</h2>
+          <p class="body mx-auto mt-2 max-w-md">
+            <%= if @filter.values.any?(&:present?)
+                  "No positions match these filters."
+                else
+                  "Closed positions will appear here once your terminal reports them."
+                end %>
+          </p>
+        </div>
+      </div>
+    <% end %>
+  </div>
+<% end %>

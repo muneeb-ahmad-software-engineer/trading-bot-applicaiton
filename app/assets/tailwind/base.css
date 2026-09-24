@@ -1,0 +1,56 @@
+/*
+ * Global element defaults. Kept deliberately small: this layer sets the page
+ * ground and accessibility defaults, and everything else is opt-in via a
+ * component class.
+ */
+@layer base {
+  html {
+    color-scheme: dark;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-text-primary);
+    font-family: var(--font-sans);
+    line-height: 1.6;
+  }
+
+  /* A single, consistent focus ring for every interactive element. Using
+     :focus-visible means keyboard users get a clear indicator without a ring
+     appearing on every mouse click. */
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+
+  ::selection {
+    background-color: color-mix(in oklab, var(--color-primary) 32%, transparent);
+    color: var(--color-text-primary);
+  }
+
+  /* Respect a user's reduced-motion preference everywhere, once. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /* Skip link: visually hidden until focused. Every page layout includes one. */
+  .skip-link {
+    @apply sr-only;
+  }
+
+  .skip-link:focus {
+    @apply not-sr-only fixed top-4 left-4 z-50 rounded-md bg-surface-elevated
+           px-4 py-2 text-sm font-semibold text-text-primary shadow-lg;
+  }
+}

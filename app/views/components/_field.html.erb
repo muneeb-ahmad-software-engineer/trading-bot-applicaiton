@@ -1,0 +1,60 @@
+<%#
+  A single form field: label, control, hint and error.
+
+  Wires up the accessibility relationships once so no caller has to remember
+  them: the label points at the control, hint and error text are referenced by
+  aria-describedby, and an error sets aria-invalid.
+
+  name:  required, used for id and input name
+  type:  text field type, or :select / :textarea
+%>
+<%
+  field_id = local_assigns.fetch(:id, "field_#{name}")
+  hint = local_assigns[:hint]
+  error = local_assigns[:error]
+  type = local_assigns.fetch(:type, "text")
+  numeric = local_assigns.fetch(:numeric, false)
+  required = local_assigns.fetch(:required, false)
+
+  hint_id = "#{field_id}_hint" if hint.present?
+  error_id = "#{field_id}_error" if error.present?
+  described_by = [ error_id, hint_id ].compact.join(" ").presence
+
+  control_class = numeric ? "input-numeric" : "input"
+%>
+<div class="field <%= local_assigns[:class] %>">
+  <label class="label" for="<%= field_id %>">
+    <%= label %><%= tag.span("*", class: "text-danger ml-0.5", "aria-hidden": true) if required %>
+  </label>
+
+  <% if type.to_sym == :select %>
+    <select id="<%= field_id %>" name="<%= name %>" class="select"
+            aria-describedby="<%= described_by %>"
+            aria-invalid="<%= error.present? %>"
+            <%= "required" if required %>>
+      <%= yield if block_given? %>
+    </select>
+  <% elsif type.to_sym == :textarea %>
+    <textarea id="<%= field_id %>" name="<%= name %>" class="textarea"
+              placeholder="<%= local_assigns[:placeholder] %>"
+              aria-describedby="<%= described_by %>"
+              aria-invalid="<%= error.present? %>"
+              <%= "required" if required %>><%= local_assigns[:value] %></textarea>
+  <% else %>
+    <input id="<%= field_id %>" name="<%= name %>" type="<%= type %>"
+           class="<%= control_class %>"
+           value="<%= local_assigns[:value] %>"
+           placeholder="<%= local_assigns[:placeholder] %>"
+           <%= tag.attributes(step: local_assigns[:step], min: local_assigns[:min], max: local_assigns[:max]).presence %>
+           aria-describedby="<%= described_by %>"
+           aria-invalid="<%= error.present? %>"
+           <%= "required" if required %>>
+  <% end %>
+
+  <% if error.present? %>
+    <p class="field-error" id="<%= error_id %>"><%= error %></p>
+  <% end %>
+  <% if hint.present? %>
+    <p class="field-hint" id="<%= hint_id %>"><%= hint %></p>
+  <% end %>
+</div>

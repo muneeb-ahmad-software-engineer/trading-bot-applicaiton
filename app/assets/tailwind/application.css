@@ -1,0 +1,27 @@
+/*
+ * Tailwind entry point.
+ *
+ * Import order matters: tokens must be registered before any @apply that
+ * references a utility generated from them.
+ *
+ *   theme.css       design tokens (the single source of truth)
+ *   base.css        global element defaults and accessibility primitives
+ *   components/*    reusable component classes built from the tokens
+ *
+ * Templates should compose these classes. A raw hex value, radius or shadow in
+ * an ERB file means something is missing from theme.css.
+ */
+@import "tailwindcss";
+
+@import "./theme.css";
+@import "./base.css";
+
+@import "./components/typography.css";
+@import "./components/buttons.css";
+@import "./components/cards.css";
+@import "./components/forms.css";
+@import "./components/feedback.css";
+@import "./components/navigation.css";
+@import "./components/app-shell.css";
+@import "./components/tables.css";
+@import "./components/modals.css";

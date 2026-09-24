@@ -1,0 +1,112 @@
+<% content_for :title, "API tokens · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/app_shell",
+           locals: { title: "API tokens",
+                     subtitle: "Tokens let your MT5 terminal or a mobile device act on your account." } do %>
+
+  <%# Shown exactly once, immediately after creation or regeneration. The
+      controller attempts a copy as soon as this renders; the button is what
+      actually guarantees the user can get it, since browsers may refuse a
+      clipboard write that no click asked for. %>
+  <% if flash[:new_token].present? %>
+    <% token_body = capture do %>
+      This is the only time it will be shown. If you lose it, regenerate the token.
+      <div data-controller="clipboard" data-clipboard-auto-value="true"
+           class="mt-3 flex items-start gap-2">
+        <code data-clipboard-target="source"
+              class="mono block flex-1 overflow-x-auto rounded-md border border-border bg-surface-sunken p-3 text-sm text-text-primary"><%= flash[:new_token] %></code>
+        <button type="button" data-action="clipboard#copy"
+                class="btn btn-outline btn-sm shrink-0 gap-1.5"
+                aria-label="Copy token to clipboard">
+          <%= render "components/icon_copy" %>
+          <span data-clipboard-target="button">Copy</span>
+        </button>
+      </div>
+      <p class="field-hint mt-1" role="status" aria-live="polite" data-clipboard-target="status"></p>
+    <% end %>
+    <div class="mb-4">
+      <%= render "components/alert", variant: :success,
+                 title: "Copy your token now", body: token_body %>
+    </div>
+  <% end %>
+
+  <%= render "components/card", title: "Create a token", body: capture { %>
+    <% if current_user.verified? %>
+      <%= form_with url: api_tokens_path, method: :post, scope: :api_token, class: "flex flex-col gap-3 sm:flex-row sm:items-end" do |form| %>
+        <div class="field flex-1">
+          <%= form.label :name, "Token name", class: "label" %>
+          <%= form.text_field :name, class: "input", placeholder: "e.g. MT5 terminal", required: true,
+                "aria-describedby": "token_name_hint" %>
+          <p class="field-hint" id="token_name_hint">A label so you can recognise and revoke it later.</p>
+        </div>
+        <%= form.submit "Create token", class: "btn btn-primary" %>
+      <% end %>
+    <% else %>
+      <%= render "components/alert", variant: :warning,
+                 title: "Verify your email first",
+                 body: "API tokens can place orders through your broker, so a verified email address is required before one can be issued." %>
+    <% end %>
+  <% } %>
+
+  <div class="card mt-4">
+    <div class="card-header"><h2 class="heading-4">Your tokens</h2></div>
+    <div class="table-wrap rounded-none border-x-0 border-b-0">
+      <table class="table">
+        <caption class="sr-only">API tokens issued for your account</caption>
+        <thead>
+          <tr>
+            <th scope="col">Name</th>
+            <th scope="col">Token</th>
+            <th scope="col">Created</th>
+            <th scope="col">Last used</th>
+            <th scope="col">Status</th>
+            <th scope="col"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <% if @api_tokens.any? %>
+            <% @api_tokens.each do |token| %>
+              <tr>
+                <td class="text-text-primary"><%= token.name %></td>
+                <td class="mono"><%= token.display_hint %></td>
+                <td class="figure-sm"><%= token.created_at.to_date.to_fs(:long) %></td>
+                <td class="figure-sm"><%= token.last_used_at ? time_ago_in_words(token.last_used_at) + " ago" : "Never" %></td>
+                <td>
+                  <% if token.active? %>
+                    <%= render "components/badge", label: "Active", variant: :success %>
+                  <% else %>
+                    <%= render "components/badge", label: "Revoked", variant: :neutral %>
+                  <% end %>
+                </td>
+                <td>
+                  <div class="flex flex-wrap items-center justify-end gap-2">
+                    <% if current_user.verified? %>
+                      <%= button_to "Regenerate", regenerate_api_token_path(token), method: :post,
+                            class: "btn btn-outline btn-sm",
+                            form: { data: { turbo_confirm: token.active? ?
+                              "Regenerate #{token.name}? The current token stops working immediately and any client using it must be updated." :
+                              "Issue a new token named #{token.name}?" } } %>
+                    <% end %>
+                    <% if token.active? %>
+                      <%= button_to "Revoke", api_token_path(token), method: :delete,
+                            class: "btn btn-danger btn-sm",
+                            form: { data: { turbo_confirm: "Revoke #{token.name}? Any client using this token is disconnected immediately." } } %>
+                    <% else %>
+                      <%# Only offered once revoked: deleting does not disconnect anything. %>
+                      <%= button_to "Delete", purge_api_token_path(token), method: :delete,
+                            class: "btn btn-ghost btn-sm text-danger",
+                            form: { data: { turbo_confirm: "Delete #{token.name} from this list? It is already revoked, so no client is affected." } } %>
+                    <% end %>
+                  </div>
+                </td>
+              </tr>
+            <% end %>
+          <% else %>
+            <tr><td colspan="6" class="table-empty">No tokens yet.</td></tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+<% end %>

@@ -1,0 +1,16 @@
+<%#
+  Status indicator: a coloured dot plus a text label.
+
+  state: :running | :live | :stopped | :warning | :error
+
+  The label is mandatory by construction. Colour alone is not an accessible way
+  to convey state, and "is the bot running?" is not a question a user should
+  have to answer by distinguishing a green dot from a grey one.
+%>
+<%
+  state ||= :stopped
+%>
+<span class="status status-<%= state %> <%= local_assigns[:class] %>">
+  <span class="status-dot" aria-hidden="true"></span>
+  <span><%= label %></span>
+</span>

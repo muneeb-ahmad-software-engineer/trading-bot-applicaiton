@@ -1,0 +1,26 @@
+<%
+  product = Rails.application.config.x.product
+%>{
+  "id": "/",
+  "name": "<%= product.name %> — <%= product.tagline %>",
+  "short_name": "<%= product.name %>",
+  "description": "<%= product.description %>",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait-primary",
+  "theme_color": "<%= product.theme_color %>",
+  "background_color": "<%= product.background_color %>",
+  "categories": ["finance", "productivity"],
+  "icons": [
+    { "src": "/icons/icon-192.png", "type": "image/png", "sizes": "192x192", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "type": "image/png", "sizes": "512x512", "purpose": "any" },
+    { "src": "/icons/icon-maskable-192.png", "type": "image/png", "sizes": "192x192", "purpose": "maskable" },
+    { "src": "/icons/icon-maskable-512.png", "type": "image/png", "sizes": "512x512", "purpose": "maskable" },
+    { "src": "/icon.svg", "type": "image/svg+xml", "sizes": "any", "purpose": "any" }
+  ]
+}
+
+<%# App shortcuts are added once /dashboard and /strategies exist — a shortcut
+    pointing at a missing route fails installation checks. %>

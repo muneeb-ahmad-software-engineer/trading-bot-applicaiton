@@ -1,0 +1,124 @@
+<% content_for :title, "Notifications · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/app_shell",
+           locals: { title: "Notifications",
+                     subtitle: "How you are told when something needs your attention." } do %>
+  <div class="space-y-4">
+    <div class="card">
+      <div class="card-header"><h2 class="heading-4">Alerts</h2></div>
+      <div class="card-body">
+        <%= form_with url: notification_settings_path, method: :patch do |form| %>
+          <div class="table-wrap">
+            <table class="table">
+              <caption class="sr-only">Notification preferences by alert type and channel</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Alert</th>
+                  <th scope="col" class="text-center">Email</th>
+                  <th scope="col" class="text-center">Push</th>
+                </tr>
+              </thead>
+              <tbody>
+                <% AlertType::ALL.each do |key, config| %>
+                  <tr>
+                    <td class="max-w-md whitespace-normal">
+                      <span class="font-medium text-text-primary"><%= config[:title] %></span>
+                      <p class="caption mt-0.5"><%= config[:description] %></p>
+                      <% if config[:mandatory] %>
+                        <p class="caption mt-1 text-warning">
+                          Always on — a running strategy with a silent terminal is not
+                          something you should find out by accident.
+                        </p>
+                      <% end %>
+                    </td>
+                    <% AlertType::CHANNELS.each do |channel| %>
+                      <td class="text-center">
+                        <% if config[:mandatory] %>
+                          <span class="choice-target">
+                            <input type="checkbox" class="checkbox" checked disabled
+                                   aria-label="<%= config[:title] %> by <%= channel %> (always on)">
+                          </span>
+                        <% else %>
+                          <input type="hidden" name="preferences[<%= key %>][<%= channel %>]" value="0">
+                          <label class="choice-target">
+                            <input type="checkbox" class="checkbox"
+                                   name="preferences[<%= key %>][<%= channel %>]" value="1"
+                                   <%= "checked" if @preferences.enabled?(key, channel) %>
+                                   aria-label="<%= config[:title] %> by <%= channel %>">
+                          </label>
+                        <% end %>
+                      </td>
+                    <% end %>
+                  </tr>
+                <% end %>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="mt-4">
+            <%= form.submit "Save preferences", class: "btn btn-primary" %>
+          </div>
+        <% end %>
+      </div>
+    </div>
+
+    <%# ---------------------------------------------------- Push devices %>
+    <div class="card" data-controller="push-subscription"
+         data-push-subscription-public-key-value="<%= Rails.application.credentials.dig(:web_push, :public_key) %>"
+         data-push-subscription-url-value="<%= push_subscriptions_path %>">
+      <div class="card-header">
+        <div>
+          <h2 class="heading-4">Push notifications</h2>
+          <p class="caption mt-0.5">Alerts delivered to this device, even when the app is closed.</p>
+        </div>
+      </div>
+      <div class="card-body">
+        <p class="body-sm">
+          Install the app to your home screen for the most reliable delivery. Push is an
+          addition to email, not a replacement — if a device is off, email still reaches you.
+        </p>
+
+        <div class="mt-4 flex flex-wrap items-center gap-3">
+          <button type="button" class="btn btn-outline btn-sm"
+                  data-action="push-subscription#subscribe"
+                  data-push-subscription-target="button">
+            Enable on this device
+          </button>
+          <span class="caption" data-push-subscription-target="status" role="status"></span>
+        </div>
+
+        <% if @devices.any? %>
+          <div class="table-wrap mt-6">
+            <table class="table">
+              <caption class="sr-only">Devices registered for push notifications</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Device</th>
+                  <th scope="col">Registered</th>
+                  <th scope="col">Last used</th>
+                  <th scope="col"><span class="sr-only">Actions</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <% @devices.each do |device| %>
+                  <tr>
+                    <td class="max-w-xs truncate"><%= device.user_agent.presence || "Unknown device" %></td>
+                    <td class="figure-sm"><%= device.created_at.to_date.to_fs(:long) %></td>
+                    <td class="figure-sm">
+                      <%= device.last_used_at ? "#{time_ago_in_words(device.last_used_at)} ago" : "Never" %>
+                    </td>
+                    <td class="text-right">
+                      <%= button_to "Remove", push_subscription_path(device), method: :delete,
+                            class: "btn btn-ghost btn-sm text-danger" %>
+                    </td>
+                  </tr>
+                <% end %>
+              </tbody>
+            </table>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  </div>
+<% end %>

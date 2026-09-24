@@ -1,0 +1,77 @@
+# Local execution layer: Postgres, and one container holding both Rails and the
+# MetaTrader terminals it starts.
+#
+#   docker compose build
+#   docker compose run --rm app bin/rails db:prepare
+#   docker compose run --rm -e MT5_VNC=1 app docker/mt5-worker/prepare-template.sh
+#   docker compose up
+#
+# See doc/EXECUTION_ARCHITECTURE.md §9.7.
+name: goldgrid
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: goldgrid
+      POSTGRES_PASSWORD: goldgrid
+      POSTGRES_DB: gold_grid_development
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U goldgrid"]
+      interval: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: docker/mt5-worker/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      RAILS_ENV: development
+      DATABASE_HOST: db
+      DATABASE_USERNAME: goldgrid
+      DATABASE_PASSWORD: goldgrid
+
+      # The switch that turns the execution layer on. Without it the runtime is
+      # `simulated` and nothing real is ever started — deliberate, so a
+      # half-configured box fails loudly rather than spawning terminals against
+      # a broker.
+      MT5_RUNTIME: local
+      MT5_INSTANCES_ROOT: /opt/goldgrid/instances
+      MT5_TEMPLATE_DIR: /opt/mt5/drive_c/Program Files/MetaTrader 5
+      MT5_TERMINAL_BINARY: /opt/mt5/drive_c/Program Files/MetaTrader 5/terminal64.exe
+      MT5_WINE_BINARY: /usr/bin/wine
+      MT5_XVFB_BINARY: /usr/bin/Xvfb
+      MT5_DISPLAY_BASE: "100"
+      MT5_MAX_INSTANCES: "4"
+      MT5_NODE_NAME: docker-local
+
+      # Written into every terminal's EA config. The EA calls the platform from
+      # inside this same container, so loopback is correct — and it is what the
+      # template's WebRequest whitelist must contain, character for character.
+      PRODUCT_BASE_URL: http://127.0.0.1:3000
+
+      # Uncomment, or pass with `-e`, to attach a VNC viewer to display :100.
+      # MT5_VNC: "1"
+    volumes:
+      # The prepared MetaTrader installation. Survives rebuilds — it holds the
+      # encrypted WebRequest whitelist, which cannot be recreated from source.
+      - mt5template:/opt/mt5
+      # One directory per terminal: config, data, logs, its own Wine prefix.
+      - mt5instances:/opt/goldgrid/instances
+      # Source mounted for development, so an edit does not need a rebuild.
+      - .:/rails
+      - bundle:/usr/local/bundle
+    ports:
+      - "3000:3000"
+      - "5901:5901"
+
+volumes:
+  pgdata:
+  mt5template:
+  mt5instances:
+  bundle:

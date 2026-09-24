@@ -1,0 +1,11 @@
+<% password_digest = BCrypt::Password.create("a-long-test-password", cost: 4) %>
+
+verified:
+  email_address: verified@example.com
+  password_digest: <%= password_digest %>
+  verified_at: <%= 2.days.ago.to_fs(:db) %>
+
+unverified:
+  email_address: unverified@example.com
+  password_digest: <%= password_digest %>
+  verified_at: <% # deliberately nil %>

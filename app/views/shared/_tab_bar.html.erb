@@ -1,0 +1,56 @@
+<%#
+  Mobile navigation.
+
+  Bottom tabs rather than a hamburger: installed to a phone home screen this is
+  reachable one-handed and matches what people expect from an app. The four
+  most-used destinations get a tab; the rest live behind "More".
+%>
+<nav class="tab-bar" aria-label="Main" data-controller="sheet"
+     data-action="keydown@document->sheet#closeOnEscape">
+  <% primary_navigation.each do |item| %>
+    <% current = nav_current?(item[:path]) %>
+    <%= link_to item[:path],
+          class: class_names("tab-link relative", "tab-link-active": current),
+          "aria-current": (current ? "page" : nil) do %>
+      <%= nav_icon(item[:icon], css_class: "tab-icon") %>
+      <span><%= item[:name] %></span>
+      <% if item[:badge].to_i.positive? %>
+        <span class="tab-badge"><span class="sr-only"><%= item[:badge] %> unread</span></span>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <button type="button" class="tab-link" data-action="sheet#open"
+          aria-haspopup="dialog" aria-expanded="false" data-sheet-target="trigger">
+    <%= nav_icon(:more, css_class: "tab-icon") %>
+    <span>More</span>
+  </button>
+
+  <div class="sheet-backdrop hidden" data-sheet-target="backdrop" data-action="click->sheet#close"></div>
+
+  <div class="sheet hidden" data-sheet-target="panel" role="dialog" aria-modal="true"
+       aria-label="More navigation">
+    <div class="sheet-handle" aria-hidden="true"></div>
+
+    <ul class="space-y-1">
+      <% secondary_navigation.each do |item| %>
+        <% current = nav_current?(item[:path]) %>
+        <li>
+          <%= link_to item[:path],
+                class: class_names("sidebar-link", "sidebar-link-active": current),
+                "aria-current": (current ? "page" : nil) do %>
+            <%= nav_icon(item[:icon]) %>
+            <span><%= item[:name] %></span>
+          <% end %>
+        </li>
+      <% end %>
+    </ul>
+
+    <div class="divider my-4"></div>
+
+    <p class="caption px-3"><%= current_user.email_address %></p>
+    <div class="mt-3 px-3">
+      <%= button_to "Log out", logout_path, method: :delete, class: "btn btn-outline w-full" %>
+    </div>
+  </div>
+</nav>

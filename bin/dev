@@ -1,0 +1,39 @@
+#!/usr/bin/env sh
+
+# An empty GEM_HOME or GEM_PATH is worse than an unset one: RubyGems treats ""
+# as a real, empty path, so it cannot find installed gems and `gem install`
+# fails trying to create a directory with no name. Some editors and terminal
+# launchers export them empty. Clear them if they are blank.
+[ -z "${GEM_HOME}" ] && unset GEM_HOME
+[ -z "${GEM_PATH}" ] && unset GEM_PATH
+
+# Default to port 3000 if not specified
+export PORT="${PORT:-3000}"
+
+# Let the debug gem allow remote connections,
+# but avoid loading until `debugger` is called
+export RUBY_DEBUG_OPEN="true"
+export RUBY_DEBUG_LAZY="true"
+
+if command -v foreman >/dev/null 2>&1; then
+  exec foreman start -f Procfile.dev "$@"
+fi
+
+# Foreman is a convenience, not a requirement. Rather than failing — or trying
+# to install a gem, which is exactly what breaks in a misconfigured
+# environment — run the same two processes directly.
+echo "foreman not available; starting the web server and CSS watcher directly."
+echo "Press Ctrl+C to stop both."
+echo
+
+./bin/rails tailwindcss:watch &
+CSS_PID=$!
+
+./bin/rails server -p "$PORT" &
+WEB_PID=$!
+
+# Stop both together, however this script is interrupted.
+trap 'kill "$CSS_PID" "$WEB_PID" 2>/dev/null; exit 0' INT TERM
+
+wait "$WEB_PID"
+kill "$CSS_PID" 2>/dev/null

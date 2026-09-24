@@ -1,0 +1,60 @@
+<%#
+  What is actually executing this strategy, in the place the user asks the
+  question. "Why is nothing happening?" is answered by the terminal's state and
+  by nothing else on this page, and a user who has to read an event log to find
+  out that their broker password was wrong has been failed by the interface.
+
+  connection: whatever is reporting for this user right now, or nil
+  instance: the user's managed terminal, or nil
+  credential: their broker details, or nil
+
+  `connection` is checked FIRST and on its own. A terminal the user runs
+  themselves with an API token has no managed instance and no stored broker
+  credentials, so judging by those alone declared a terminal that was reporting
+  every ten seconds to be absent — on the page whose whole job is to answer
+  "is anything running this?", while the sidebar two inches away said it was
+  connected. Reporting is the evidence. Who started the terminal is not.
+%>
+<% if connection&.live? %>
+  <%= render "components/alert", variant: :success,
+             title: "Your terminal is connected",
+             body: "#{connection.broker.presence || 'Your terminal'} is reporting " \
+                   "#{connection.symbol.presence || 'this symbol'}, last heard from " \
+                   "#{time_ago_in_words(connection.last_report_at)} ago. " \
+                   "Everything below comes from it." %>
+<% elsif instance&.healthy? %>
+  <%# Connected and reporting. The figures on this page are real, so nothing
+      is claimed here that the status indicator does not already show. %>
+<% elsif connection.present? %>
+  <%# It reported once and then stopped. That is a different problem from
+      never having connected, and it has a different fix. %>
+  <%= render "components/alert", variant: :warning,
+             title: "Your terminal has stopped reporting",
+             body: "The last report was #{time_ago_in_words(connection.last_report_at)} ago. " \
+                   "Check that MetaTrader is still open, that Algo Trading is on, and that " \
+                   "the Expert Advisor is still attached to the chart." %>
+<% elsif instance.nil? && credential.nil? %>
+  <% unconnected = capture do %>
+    Nothing is executing this strategy, so no positions, prices or profit are shown —
+    there are none to show. Add your
+    <%= link_to "broker account", edit_broker_credential_path, class: "link" %>
+    and the platform will run a terminal for you, or run MetaTrader yourself with an
+    <%= link_to "API token", api_tokens_path, class: "link" %>.
+  <% end %>
+  <%= render "components/alert", variant: :warning,
+             title: "No terminal is connected", body: unconnected %>
+<% elsif instance.nil? %>
+  <%= render "components/alert", variant: :info,
+             title: "No terminal yet",
+             body: "Your broker details are saved. A terminal is started for you when you start this strategy." %>
+<% elsif instance.failed? %>
+  <%= render "components/alert", variant: :danger,
+             title: "Your terminal stopped with an error",
+             body: instance.last_error_message.presence ||
+                   "The terminal failed and has not been able to restart." %>
+<% else %>
+  <%= render "components/alert", variant: :info,
+             title: "Your terminal is #{instance.state}",
+             body: "It is not reporting yet, so no positions, prices or profit are shown. " \
+                   "A terminal normally takes a minute or two to sign in to a broker." %>
+<% end %>

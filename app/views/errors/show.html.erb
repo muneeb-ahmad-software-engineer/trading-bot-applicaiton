@@ -1,0 +1,23 @@
+<% content_for :title, "#{status} · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<main id="main" class="container-page section">
+  <div class="mx-auto max-w-lg text-center">
+    <p class="eyebrow"><%= status %></p>
+    <h1 class="heading-1 mt-2">
+      <%= status == 404 ? "Page not found" : "Something went wrong" %>
+    </h1>
+    <p class="body-lg mt-4"><%= message %></p>
+
+    <% if status >= 500 %>
+      <p class="caption mt-4">
+        If you have a strategy running, this page does not affect it. Your Expert
+        Advisor holds the broker connection and continues independently of this site.
+      </p>
+    <% end %>
+
+    <div class="mt-8 flex flex-col justify-center gap-3 sm:flex-row">
+      <%= link_to "Back to home", root_path, class: "btn btn-primary" %>
+    </div>
+  </div>
+</main>

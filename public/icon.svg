@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="GoldGrid">
+  <rect width="512" height="512" rx="96" fill="#0F172A"/>
+  <g transform="translate(256 256) scale(1) translate(-256 -256)">
+    <g stroke="#24365C" stroke-width="12" stroke-linecap="round">
+      <line x1="88" y1="152" x2="424" y2="152"/>
+      <line x1="88" y1="222" x2="424" y2="222"/>
+      <line x1="88" y1="290" x2="424" y2="290"/>
+      <line x1="88" y1="360" x2="424" y2="360"/>
+    </g>
+    <line x1="256" y1="120" x2="256" y2="392" stroke="#C9A227" stroke-width="14" stroke-linecap="round"/>
+    <g fill="#C9A227">
+      <circle cx="160" cy="152" r="26"/>
+      <circle cx="352" cy="222" r="26"/>
+      <circle cx="160" cy="290" r="26"/>
+      <circle cx="352" cy="360" r="26"/>
+    </g>
+  </g>
+</svg>
