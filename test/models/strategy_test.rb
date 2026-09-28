@@ -526,6 +526,20 @@ class StrategyTest < ActiveSupport::TestCase
     assert_invalid build_trailing(trailing_stop_points: nil), :trailing_stop_points
   end
 
+  test "a reversal strategy needs only a distance, and trails from the start on both sides" do
+    assert_valid build_trailing(category: "reversal")
+    assert_invalid build_trailing(category: "reversal", trailing_stop_points: nil), :trailing_stop_points
+    assert_invalid build_trailing(category: "reversal", trailing_activation_points: 100), :trailing_activation_points
+    assert_invalid build_trailing(category: "reversal", direction: "buy"), :direction
+  end
+
+  test "a reversal strategy holds one position, so its ceiling is a single entry" do
+    strategy = build_trailing(category: "reversal", initial_lot: 0.05, max_exposure_lots: 0.05)
+
+    assert_equal BigDecimal("0.05"), strategy.maximum_theoretical_lots
+    assert_valid strategy
+  end
+
   test "a grid still requires its spacing and levels" do
     assert_invalid build(grid_spacing_points: nil), :grid_spacing_points
     assert_invalid build(grid_levels: nil), :grid_levels

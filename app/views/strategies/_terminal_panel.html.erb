@@ -7,6 +7,8 @@
   connection: whatever is reporting for this user right now, or nil
   instance: the user's managed terminal, or nil
   credential: their broker details, or nil
+  diagnostics: what the terminal last logged about a problem (see
+    Mt5::Runtime::Local#diagnostics), shown when it is not connected
 
   `connection` is checked FIRST and on its own. A terminal the user runs
   themselves with an API token has no managed instance and no stored broker
@@ -25,9 +27,11 @@
 <% elsif instance&.healthy? %>
   <%# Connected and reporting. The figures on this page are real, so nothing
       is claimed here that the status indicator does not already show. %>
-<% elsif connection.present? %>
-  <%# It reported once and then stopped. That is a different problem from
-      never having connected, and it has a different fix. %>
+<% elsif instance.nil? && connection.present? %>
+  <%# A terminal the user runs themselves reported once and then stopped.
+      That is a different problem from never having connected, and it has a
+      different fix. A managed terminal's own state, below, says more than
+      this ever could, so it is only for terminals we do not run. %>
   <%= render "components/alert", variant: :warning,
              title: "Your terminal has stopped reporting",
              body: "The last report was #{time_ago_in_words(connection.last_report_at)} ago. " \
@@ -48,13 +52,37 @@
              title: "No terminal yet",
              body: "Your broker details are saved. A terminal is started for you when you start this strategy." %>
 <% elsif instance.failed? %>
+  <% failed_body = capture do %>
+    <p><%= instance.last_error_message.presence || "The terminal failed and has not been able to restart." %></p>
+    <% if instance.crash_looping? %>
+      <p class="mt-2">
+        It has failed <%= instance.consecutive_failures %> times in a row, so automatic restarts are paused.
+        Fix anything listed below, then retry.
+      </p>
+    <% elsif instance.next_restart_at&.future? %>
+      <p class="mt-2">The next automatic attempt is in <%= distance_of_time_in_words_to_now(instance.next_restart_at) %>.</p>
+    <% end %>
+    <%= render "strategies/terminal_diagnostics", instance:, diagnostics: %>
+  <% end %>
   <%= render "components/alert", variant: :danger,
-             title: "Your terminal stopped with an error",
-             body: instance.last_error_message.presence ||
-                   "The terminal failed and has not been able to restart." %>
-<% else %>
+             title: instance.crash_looping? ? "Your terminal keeps failing" : "Your terminal stopped with an error",
+             body: failed_body %>
+<% elsif instance.running? || instance.connecting? || instance.starting? %>
+  <% waiting_body = capture do %>
+    <p>
+      It is not reporting yet, so no positions, prices or profit are shown.
+      A terminal normally takes a minute or two to sign in to a broker.
+    </p>
+    <%= render "strategies/terminal_diagnostics", instance:, diagnostics: %>
+  <% end %>
   <%= render "components/alert", variant: :info,
-             title: "Your terminal is #{instance.state}",
-             body: "It is not reporting yet, so no positions, prices or profit are shown. " \
-                   "A terminal normally takes a minute or two to sign in to a broker." %>
+             title: instance.running? ? "Your terminal has stopped reporting" : "Your terminal is #{instance.state}",
+             body: waiting_body %>
+<% else %>
+  <% stopped_body = capture do %>
+    <p>It is not reporting, so no positions, prices or profit are shown.</p>
+    <%= render "strategies/terminal_diagnostics", instance:, diagnostics: %>
+  <% end %>
+  <%= render "components/alert", variant: :info,
+             title: "Your terminal is #{instance.state}", body: stopped_body %>
 <% end %>

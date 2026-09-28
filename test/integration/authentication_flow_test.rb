@@ -115,6 +115,25 @@ class AuthenticationFlowTest < ActionDispatch::IntegrationTest
     assert_not token.reload.active?, "API tokens must be revoked so a connected client is evicted"
   end
 
+  # A managed terminal's token never leaves the worker node, so revoking it
+  # evicts nobody — it only cuts the user's live terminal off mid-trade.
+  test "resetting a password keeps the platform's own terminal connected" do
+    user = users(:verified)
+
+    with_mt5_sandbox do
+      worker_node
+      instance = provision!(user)
+      reset_token = user.generate_token_for(:password_reset)
+
+      patch password_path, params: {
+        token: reset_token,
+        password: "a-brand-new-password", password_confirmation: "a-brand-new-password"
+      }
+
+      assert instance.reload.api_token.active?, "a managed terminal's token must survive a password reset"
+    end
+  end
+
   # The emailed link is the only way a real user reaches the reset form, so the
   # flow is driven end to end from the delivered mail rather than from a token
   # generated in the test. A helper that drops the token into :format instead of

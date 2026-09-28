@@ -1,0 +1,8 @@
+<%# One row per setting: its name with an (i) explanation, and its value.
+    rows: [[field, label, value], ...] — field keys config/locales/strategy_help.en.yml. %>
+<% rows.each do |field, label, value| %>
+  <div class="flex items-center justify-between gap-4">
+    <dt class="body-sm label-row"><%= label %><%= field_info(field, label:) %></dt>
+    <dd class="figure-sm"><%= value %></dd>
+  </div>
+<% end %>

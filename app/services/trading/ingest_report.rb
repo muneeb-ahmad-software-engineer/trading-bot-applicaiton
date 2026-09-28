@@ -145,11 +145,43 @@ module Trading
         seen << position.ticket
       end
 
+      apply_closed_positions(strategy)
+
       # A position that was open and is no longer reported has been closed at the
       # broker. It is marked closed rather than deleted, so trading history
       # survives and the record of what happened is not silently discarded.
+      #
+      # This is the fallback, not the record. The EA reports recent closes with
+      # the broker's own deal price and profit, and those numbers land above;
+      # this sweep only catches a close the terminal never got to report — a
+      # crash between the deal and the next report — where the last seen price
+      # is the best information anyone still has.
       strategy.positions.open.where.not(ticket: seen).find_each do |position|
         position.update!(closed_at: Time.current, close_price: position.current_price)
+      end
+    end
+
+    # The broker's account of each recently closed position: the deal price it
+    # actually executed at, and the realised profit, swap and commission. The
+    # floating figures the position carried while open can be seconds stale by
+    # the time a stop fires — observed on a trailing stop that executed at
+    # 4292.96 while the last report still said 4291.94 — so the deal record
+    # overwrites them, even on a position the vanish sweep already closed. The
+    # EA re-reports closes for a while, which is what makes this self-healing:
+    # a close recorded from stale data is corrected on the next report.
+    def apply_closed_positions(strategy)
+      Array(params[:closed_positions]).each do |attrs|
+        position = strategy.positions.find_by(ticket: attrs[:ticket].to_s)
+        next if position.nil?
+
+        position.update!(
+          close_price: attrs[:close_price],
+          current_price: attrs[:close_price],
+          profit: attrs[:profit],
+          swap: attrs[:swap],
+          commission: attrs[:commission],
+          closed_at: attrs[:closed_at].presence || position.closed_at || Time.current
+        )
       end
     end
 

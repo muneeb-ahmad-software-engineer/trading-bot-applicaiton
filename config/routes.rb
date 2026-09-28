@@ -74,6 +74,9 @@ Rails.application.routes.draw do
       post :stop
     end
   end
+  # The user's managed MT5 terminal. Singular: a user has one.
+  post "terminal/restart" => "terminals#restart", as: :restart_terminal
+
   get "settings" => "settings#show", as: :settings
   get "profile"  => "profiles#show", as: :profile
   get "activity" => "activity#index", as: :activity

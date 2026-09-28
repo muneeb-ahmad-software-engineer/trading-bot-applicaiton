@@ -34,6 +34,7 @@ module Api
             tick: %i[bid ask spread_points],
             account: %i[currency balance equity margin free_margin margin_level_percent],
             positions: %i[ticket direction grid_level volume open_price current_price stop_loss profit swap commission opened_at],
+            closed_positions: %i[ticket close_price profit swap commission closed_at],
             orders: %i[ticket order_type grid_level volume price placed_at]
           )
         end

@@ -16,6 +16,7 @@
 
   .sidebar {
     @apply fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-border bg-surface;
+    padding-top: env(safe-area-inset-top);
     transition: width var(--duration-base) ease;
   }
 
@@ -100,6 +101,8 @@
 
   .app-header {
     @apply sticky top-0 z-30 flex min-h-16 items-center gap-4 border-b border-border px-4 py-3 sm:px-6;
+    /* Clear the iOS status bar / notch (black-translucent + viewport-fit=cover). */
+    padding-top: calc(0.75rem + env(safe-area-inset-top));
     background-color: color-mix(in oklab, var(--color-background) 88%, transparent);
     backdrop-filter: blur(12px);
   }

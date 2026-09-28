@@ -12,28 +12,32 @@
         <legend class="heading-4">Basics</legend>
         <div class="form-section-body">
           <div class="field field-wide">
-            <%= form.label :name, "Strategy name", class: "label" %>
+            <%= label_with_info(form, :name, "Strategy name") %>
             <%= form.text_field :name, class: "input", required: true,
                   "aria-invalid": strategy.errors[:name].any? %>
           </div>
 
           <div class="field field-wide">
-            <%= form.label :category, "Strategy type", class: "label" %>
+            <%= label_with_info(form, :category, "Strategy type") %>
             <%= form.select :category,
                   [ [ "Grid — add levels as price moves against the basket", "grid" ],
-                    [ "Trailing stop — one position per direction, stop follows the price", "trailing" ] ],
+                    [ "Trailing stop — one position per direction, stop follows the price", "trailing" ],
+                    [ "Reversal — always in one trade; a trailing opposite order flips it when price turns", "reversal" ] ],
                   {}, class: "select",
                   data: { strategy_category_target: "category", action: "change->strategy-category#apply" },
                   "aria-describedby": "category_hint" %>
             <p class="field-hint" id="category_hint">
               A grid averages into a move. A trailing strategy takes one position and lets
               the stop follow price in the favourable direction only. Both types can use a
-              trailing stop; only a grid has levels.
+              trailing stop; only a grid has levels. A reversal strategy holds one trade at a
+              time with a stop order for the opposite side trailing behind it at the trailing
+              distance. When price turns that far, the trade closes and the opposite one opens
+              in its place. It needs a hedging account, both directions, and no activation.
             </p>
           </div>
 
           <div class="field">
-            <%= form.label :direction, "Order direction", class: "label" %>
+            <%= label_with_info(form, :direction, "Order direction") %>
             <%= form.select :direction,
                   [ [ "Both directions", "both" ], [ "Buy only", "buy" ], [ "Sell only", "sell" ] ],
                   {}, class: "select", "aria-describedby": "direction_hint" %>
@@ -47,7 +51,7 @@
           </div>
 
           <div class="field">
-            <%= form.label :symbol, "Symbol", class: "label" %>
+            <%= label_with_info(form, :symbol, "Symbol") %>
             <%# Rendered through the form builder so the id matches the label's
                 `for`. A bare input here left the field with no accessible name.
                 Disabled, so it is informational and never submitted. %>
@@ -66,7 +70,7 @@
         <legend class="heading-4">Position sizing</legend>
         <div class="form-section-body">
           <div class="field">
-            <%= form.label :initial_lot, "Entry lot size", class: "label" %>
+            <%= label_with_info(form, :initial_lot, "Entry lot size") %>
             <%= form.number_field :initial_lot, class: "input-numeric", required: true, step: 0.01, min: 0.01,
                   "aria-describedby": "initial_lot_hint", "aria-invalid": strategy.errors[:initial_lot].any? %>
             <p class="field-hint" id="initial_lot_hint">
@@ -76,7 +80,7 @@
           </div>
 
           <div class="field" data-strategy-category-target="grid">
-            <%= form.label :lot_mode, "Lot sizing mode", class: "label" %>
+            <%= label_with_info(form, :lot_mode, "Lot sizing mode") %>
             <%= form.select :lot_mode,
                   [ [ "Fixed — every level the same size", "fixed" ],
                     [ "Multiplier — each level scales up", "multiplier" ] ],
@@ -84,7 +88,7 @@
           </div>
 
           <div class="field field-wide" data-strategy-category-target="grid">
-            <%= form.label :lot_multiplier, "Lot multiplier", class: "label" %>
+            <%= label_with_info(form, :lot_multiplier, "Lot multiplier") %>
             <%= form.number_field :lot_multiplier, class: "input-numeric", step: 0.01, min: 1,
                   "aria-describedby": "multiplier_hint", "aria-invalid": strategy.errors[:lot_multiplier].any? %>
             <p class="field-hint" id="multiplier_hint">
@@ -104,7 +108,7 @@
         <p class="form-section-description">How levels are spaced. Grid strategies only.</p>
         <div class="form-section-body">
           <div class="field">
-            <%= form.label :grid_spacing_points, "Grid spacing (points)", class: "label" %>
+            <%= label_with_info(form, :grid_spacing_points, "Grid spacing (points)") %>
             <%= form.number_field :grid_spacing_points, class: "input-numeric", min: 1,
                   "aria-describedby": "spacing_hint", "aria-invalid": strategy.errors[:grid_spacing_points].any? %>
             <p class="field-hint" id="spacing_hint">
@@ -113,7 +117,7 @@
           </div>
 
           <div class="field">
-            <%= form.label :grid_levels, "Grid levels", class: "label" %>
+            <%= label_with_info(form, :grid_levels, "Grid levels") %>
             <%= form.number_field :grid_levels, class: "input-numeric", min: 1,
                   "aria-invalid": strategy.errors[:grid_levels].any? %>
           </div>
@@ -133,7 +137,7 @@
         </p>
         <div class="form-section-body">
           <div class="field field-wide">
-            <%= form.label :trailing_stop_points, "Trailing distance (points)", class: "label" %>
+            <%= label_with_info(form, :trailing_stop_points, "Trailing distance (points)") %>
             <%= form.number_field :trailing_stop_points, class: "input-numeric", min: 1,
                   data: { strategy_category_target: "trailingRequired" },
                   "aria-describedby": "trailing_stop_hint",
@@ -147,7 +151,7 @@
           </div>
 
           <div class="field">
-            <%= form.label :trailing_activation_points, "Start trailing after (points)", class: "label" %>
+            <%= label_with_info(form, :trailing_activation_points, "Start trailing after (points)") %>
             <%= form.number_field :trailing_activation_points, class: "input-numeric", min: 1,
                   "aria-describedby": "trailing_activation_hint",
                   "aria-invalid": strategy.errors[:trailing_activation_points].any? %>
@@ -159,7 +163,7 @@
           </div>
 
           <div class="field">
-            <%= form.label :trailing_step_points, "Minimum step (points)", class: "label" %>
+            <%= label_with_info(form, :trailing_step_points, "Minimum step (points)") %>
             <%= form.number_field :trailing_step_points, class: "input-numeric", min: 1,
                   "aria-describedby": "trailing_step_hint",
                   "aria-invalid": strategy.errors[:trailing_step_points].any? %>
@@ -182,12 +186,12 @@
         <p class="form-section-description">When a basket of positions is closed as a whole. Leave blank for none.</p>
         <div class="form-section-body">
           <div class="field">
-            <%= form.label :basket_take_profit, "Basket take profit", class: "label" %>
+            <%= label_with_info(form, :basket_take_profit, "Basket take profit") %>
             <%= form.number_field :basket_take_profit, class: "input-numeric", step: 0.01, min: 0,
                   "aria-invalid": strategy.errors[:basket_take_profit].any? %>
           </div>
           <div class="field">
-            <%= form.label :basket_stop_loss, "Basket stop loss", class: "label" %>
+            <%= label_with_info(form, :basket_stop_loss, "Basket stop loss") %>
             <%= form.number_field :basket_stop_loss, class: "input-numeric", step: 0.01, min: 0,
                   "aria-invalid": strategy.errors[:basket_stop_loss].any? %>
           </div>
@@ -206,27 +210,27 @@
         </p>
         <div class="form-section-body">
           <div class="field">
-            <%= form.label :max_positions, "Maximum positions", class: "label" %>
+            <%= label_with_info(form, :max_positions, "Maximum positions") %>
             <%= form.number_field :max_positions, class: "input-numeric", required: true, min: 1,
                   "aria-invalid": strategy.errors[:max_positions].any? %>
           </div>
           <div class="field">
-            <%= form.label :max_exposure_lots, "Maximum exposure (lots)", class: "label" %>
+            <%= label_with_info(form, :max_exposure_lots, "Maximum exposure (lots)") %>
             <%= form.number_field :max_exposure_lots, class: "input-numeric", required: true, step: 0.01, min: 0.01,
                   "aria-invalid": strategy.errors[:max_exposure_lots].any? %>
           </div>
           <div class="field">
-            <%= form.label :max_drawdown_percent, "Drawdown protection (%)", class: "label" %>
+            <%= label_with_info(form, :max_drawdown_percent, "Drawdown protection (%)") %>
             <%= form.number_field :max_drawdown_percent, class: "input-numeric", step: 0.01, min: 0, max: 100,
                   "aria-invalid": strategy.errors[:max_drawdown_percent].any? %>
           </div>
           <div class="field">
-            <%= form.label :min_margin_level_percent, "Margin protection (min margin level %)", class: "label" %>
+            <%= label_with_info(form, :min_margin_level_percent, "Margin protection (min margin level %)") %>
             <%= form.number_field :min_margin_level_percent, class: "input-numeric", step: 0.01, min: 0,
                   "aria-invalid": strategy.errors[:min_margin_level_percent].any? %>
           </div>
           <div class="field field-wide">
-            <%= form.label :max_spread_points, "Maximum spread (points)", class: "label" %>
+            <%= label_with_info(form, :max_spread_points, "Maximum spread (points)") %>
             <%= form.number_field :max_spread_points, class: "input-numeric", min: 1,
                   "aria-describedby": "spread_hint", "aria-invalid": strategy.errors[:max_spread_points].any? %>
             <p class="field-hint" id="spread_hint">New orders are skipped while the spread is wider than this.</p>

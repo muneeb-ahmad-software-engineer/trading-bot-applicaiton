@@ -4,6 +4,8 @@
 @layer components {
   .navbar {
     @apply sticky top-0 z-40 border-b border-border;
+    /* Clear the iOS status bar / notch (black-translucent + viewport-fit=cover). */
+    padding-top: env(safe-area-inset-top);
     /* Slight translucency so content scrolling under the bar reads as depth. */
     background-color: color-mix(in oklab, var(--color-background) 85%, transparent);
     backdrop-filter: blur(12px);

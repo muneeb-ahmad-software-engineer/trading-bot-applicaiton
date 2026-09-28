@@ -73,6 +73,15 @@ Rails.application.configure do
   # Highlight code that enqueued background job in logs.
   config.active_job.verbose_enqueue_logs = true
 
+  # Solid Queue, in the development database. The default :async adapter runs
+  # jobs but has no scheduler, so the recurring MT5 jobs (reconcile, reap,
+  # monitor) never fire and the worker node's heartbeat goes stale two minutes
+  # after registration — after which every Start fails with no_capacity. The
+  # supervisor rides inside Puma (config/puma.rb, SOLID_QUEUE_IN_PUMA) because
+  # the Local runtime requires everything in one container. No `connects_to`
+  # here: unlike production, the tables live in the primary database.
+  config.active_job.queue_adapter = :solid_queue
+
   # Raises error for missing translations.
   # config.i18n.raise_on_missing_translations = true
 

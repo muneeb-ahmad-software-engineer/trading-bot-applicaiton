@@ -20,6 +20,12 @@
 //|   * grid     — adds levels as price moves against the basket.     |
 //|   * trailing — one position per direction, managed by a stop that |
 //|                follows price in the favourable direction only.    |
+//|   * reversal — one position at a time. A stop order for the       |
+//|                opposite side rests at the position's trailing     |
+//|                stop, so a turn of the trailing distance closes    |
+//|                the position and opens the opposite one. Flat, it  |
+//|                brackets the market with a buy stop and a sell     |
+//|                stop. Requires a hedging account.                  |
 //|                                                                   |
 //| Both categories run BUY and SELL independently and continuously   |
 //| when direction is "both": each side opens on its own, exits on    |
@@ -67,6 +73,14 @@ input group "Execution"
 input long   InpMagicNumber    = 20260906;                  // Identifies this EA's orders
 input int    InpSlippagePoints = 20;                        // Maximum price deviation
 input bool   InpAllowTrading   = false;                     // Master switch — off by default, on purpose
+
+//--- How far back each report looks for closed positions to include. Six
+//--- hours, so that a platform that recorded a close from stale data — or
+//--- missed it entirely across its own restart — keeps getting the broker's
+//--- real numbers until well after anyone could care. The cost is a few
+//--- history reads per report; the list itself only carries each position
+//--- once.
+#define CLOSED_REPORT_WINDOW_SECONDS (6 * 3600)
 
 //--- State --------------------------------------------------------------
 // Globals carry a g_ prefix so that a parameter named `strategy` inside a
@@ -290,8 +304,44 @@ void ManageBaskets()
    //--- loss they configured the stop to prevent.
    g_grid.ApplyTrailingStops(g_strategy);
 
+   if(g_strategy.category == CATEGORY_REVERSAL)
+     {
+      ManageReversal();
+      return;
+     }
+
    ManageDirection(POSITION_TYPE_BUY);
    ManageDirection(POSITION_TYPE_SELL);
+  }
+
+//+------------------------------------------------------------------+
+//| Closes a basket that has reached its take profit or stop loss.   |
+//| Returns true if it did.                                           |
+//+------------------------------------------------------------------+
+bool ExitBasketIfDue(const ENUM_POSITION_TYPE type, const SBasket &basket)
+  {
+   if(!g_grid.ShouldCloseBasket(g_strategy, basket))
+      return false;
+
+   int closed = g_grid.CloseBasket(type);
+
+   //--- Record *why*, and the spread at the moment of the decision.
+   //---
+   //--- A basket is valued at the price it could be closed at, so it carries
+   //--- the full spread. When the spread widens — rollover, news, thin
+   //--- liquidity — a basket can cross its stop loss without the market
+   //--- having moved against it at all. Observed on a demo account: the EA
+   //--- measured -1.55 and stopped out while the spread was 245 points; the
+   //--- actual fill was -0.23. Without the spread in this line that looks
+   //--- like a broker discrepancy rather than what it is.
+   string why = "stop loss";
+   if(g_strategy.has_basket_take_profit && basket.profit >= g_strategy.basket_take_profit)
+      why = "take profit";
+
+   PrintFormat("GoldGrid: closed %d %s position(s) on %s, basket P/L %.2f, spread %d points",
+               closed, type == POSITION_TYPE_BUY ? "buy" : "sell", why, basket.profit,
+               (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD));
+   return true;
   }
 
 //+------------------------------------------------------------------+
@@ -304,28 +354,8 @@ void ManageDirection(const ENUM_POSITION_TYPE type)
    SBasket basket = g_grid.Basket(type);
 
    //--- 1. Exits first. Closing takes precedence over opening, always.
-   if(g_grid.ShouldCloseBasket(g_strategy, basket))
-     {
-      int closed = g_grid.CloseBasket(type);
-
-      //--- Record *why*, and the spread at the moment of the decision.
-      //---
-      //--- A basket is valued at the price it could be closed at, so it carries
-      //--- the full spread. When the spread widens — rollover, news, thin
-      //--- liquidity — a basket can cross its stop loss without the market
-      //--- having moved against it at all. Observed on a demo account: the EA
-      //--- measured -1.55 and stopped out while the spread was 245 points; the
-      //--- actual fill was -0.23. Without the spread in this line that looks
-      //--- like a broker discrepancy rather than what it is.
-      string why = "stop loss";
-      if(g_strategy.has_basket_take_profit && basket.profit >= g_strategy.basket_take_profit)
-         why = "take profit";
-
-      PrintFormat("GoldGrid: closed %d %s position(s) on %s, basket P/L %.2f, spread %d points",
-                  closed, type == POSITION_TYPE_BUY ? "buy" : "sell", why, basket.profit,
-                  (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD));
+   if(ExitBasketIfDue(type, basket))
       return;
-     }
 
    //--- 2. Opening is gated.
    if(halted || !InpAllowTrading)
@@ -376,7 +406,11 @@ void ManageDirection(const ENUM_POSITION_TYPE type)
    //--- being stopped out does not disturb a sell that is still running.
    if(basket.count == 0)
      {
-      if(g_grid.OpenMarket(type, next_lot, StringFormat("GG:%I64d:L1", g_strategy.id)))
+      //--- A trailing position opens with its stop already attached: it has
+      //--- no other exit, so it is never left without one while it waits to
+      //--- reach activation.
+      int initial_stop = (g_strategy.category != CATEGORY_GRID) ? g_strategy.trailing_stop_points : 0;
+      if(g_grid.OpenMarket(type, next_lot, StringFormat("GG:%I64d:L1", g_strategy.id), initial_stop))
         {
          last_open_at[DirectionSlot(type)] = NowMs();
          LogOpen(type, 1, next_lot);
@@ -400,6 +434,112 @@ void ManageDirection(const ENUM_POSITION_TYPE type)
       last_open_at[DirectionSlot(type)] = NowMs();
       LogOpen(type, next_level, next_lot);
      }
+  }
+
+//+------------------------------------------------------------------+
+//| THE REVERSAL STRATEGY.                                            |
+//|                                                                   |
+//|   flat        buy stop above, sell stop below, each the trailing  |
+//|               distance from the market                            |
+//|   buy active  its stop trails up behind price; a sell stop rests  |
+//|               at the same price and moves with it                 |
+//|   price turns the stop closes the buy and the sell stop opens the |
+//|               sell, together, on the broker's side                |
+//|   sell active mirror image, with a buy stop trailing above        |
+//|                                                                   |
+//| Nothing here closes or opens a position at market. Every          |
+//| transition is an order the broker already holds, so a reversal   |
+//| still happens if the terminal is offline when price gets there.   |
+//| This EA's job is only to keep those orders where they belong.     |
+//+------------------------------------------------------------------+
+void ManageReversal()
+  {
+   SBasket buys  = g_grid.Basket(POSITION_TYPE_BUY);
+   SBasket sells = g_grid.Basket(POSITION_TYPE_SELL);
+
+   //--- Basket exits still apply to the single position.
+   if(ExitBasketIfDue(POSITION_TYPE_BUY, buys) || ExitBasketIfDue(POSITION_TYPE_SELL, sells))
+      return;
+
+   bool   may_trade = !halted && InpAllowTrading;
+   double lot       = GridLotForLevel(g_strategy, 1, _Symbol);
+   int    held      = buys.count + sells.count;
+   string reason;
+
+   //--- Both sides open: the reversal order filled a moment before the old
+   //--- position's stop closed it, or the account was left that way. Its stop
+   //--- takes the old one out; nothing new is added meanwhile.
+   if(held > 1)
+     {
+      g_grid.DeleteAllPendingStops();
+      return;
+     }
+
+   if(held == 1)
+     {
+      ENUM_POSITION_TYPE side     = buys.count > 0 ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
+      ENUM_POSITION_TYPE opposite = side == POSITION_TYPE_BUY ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+
+      //--- Left over from the bracket that opened this position.
+      g_grid.DeletePendingStops(side);
+
+      //--- The reversal order rests where the position's stop is. Until the
+      //--- stop is placed there is nowhere to put it.
+      double stop = g_grid.PositionStop(side);
+      if(stop <= 0.0)
+         return;
+
+      double volume = side == POSITION_TYPE_BUY ? buys.volume : sells.volume;
+      if(!may_trade ||
+         !g_grid.MayOpen(g_strategy, ConfigurationIsFresh(), lot, opposite, reason, 1, volume, true))
+        {
+         //--- Fail closed: no reversal order, and the position keeps the stop
+         //--- that protects it on its own.
+         NoteGate(opposite, may_trade ? reason : (halted ? halt_reason : "AllowTrading is off"));
+         g_grid.DeletePendingStops(opposite);
+         return;
+        }
+      last_gate_note = "";
+
+      g_grid.PlacePendingStop(opposite, lot, stop, g_strategy.trailing_stop_points,
+                              StringFormat("GG:%I64d:REV", g_strategy.id));
+      return;
+     }
+
+   //--- Flat: bracket the market. An order already resting on a side stays
+   //--- where it is — it may be the reversal order in the instant before it
+   //--- fills — and only a missing side is added.
+   if(!may_trade ||
+      !g_grid.MayOpen(g_strategy, ConfigurationIsFresh(), lot, POSITION_TYPE_BUY, reason, 0, 0.0, true))
+     {
+      NoteGate(POSITION_TYPE_BUY, may_trade ? reason : (halted ? halt_reason : "AllowTrading is off"));
+      g_grid.DeleteAllPendingStops();
+      return;
+     }
+   last_gate_note = "";
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(bid <= 0.0 || ask <= 0.0)
+      return;
+
+   double distance = g_strategy.trailing_stop_points * _Point;
+   string comment  = StringFormat("GG:%I64d:L1", g_strategy.id);
+
+   if(g_grid.FindPendingStop(POSITION_TYPE_BUY) == 0)
+      g_grid.PlacePendingStop(POSITION_TYPE_BUY, lot, ask + distance, g_strategy.trailing_stop_points, comment);
+   if(g_grid.FindPendingStop(POSITION_TYPE_SELL) == 0)
+      g_grid.PlacePendingStop(POSITION_TYPE_SELL, lot, bid - distance, g_strategy.trailing_stop_points, comment);
+  }
+
+//--- Prints why nothing is being opened, once per change of reason.
+void NoteGate(const ENUM_POSITION_TYPE type, const string reason)
+  {
+   string note = StringFormat("%s:%s", type == POSITION_TYPE_BUY ? "buy" : "sell", reason);
+   if(note == last_gate_note)
+      return;
+   PrintFormat("GoldGrid: not opening %s — %s", type == POSITION_TYPE_BUY ? "buy" : "sell", reason);
+   last_gate_note = note;
   }
 
 //+------------------------------------------------------------------+
@@ -531,10 +671,130 @@ string BuildReportJson()
      }
    json += "],";
 
-   //--- This EA opens positions at market rather than resting pending orders,
-   //--- so the list is always empty. It is still sent, so the platform clears
-   //--- anything left over from a previous configuration.
-   json += "\"orders\":[]";
+   //--- Recently closed positions, from the broker's deal history. The open
+   //--- list above carries floating figures that go stale the moment a stop
+   //--- fires: a position that vanished between reports would otherwise be
+   //--- recorded by the platform at the last price it happened to report,
+   //--- not the price the broker actually closed it at. Re-reported for a
+   //--- whole window rather than once, deliberately — the report protocol is
+   //--- idempotent snapshots, and a close the platform recorded from stale
+   //--- data gets corrected the next time it hears from us.
+   json += "\"closed_positions\":[";
+   int closed_written = 0;
+   if(HistorySelect(TimeCurrent() - CLOSED_REPORT_WINDOW_SECONDS, TimeCurrent() + 3600))
+     {
+      long reported_ids[];
+      int  deals = HistoryDealsTotal();
+
+      for(int i = 0; i < deals; i++)
+        {
+         ulong deal = HistoryDealGetTicket(i);
+         if(deal == 0)
+            continue;
+         if(HistoryDealGetInteger(deal, DEAL_MAGIC) != InpMagicNumber)
+            continue;
+         if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol)
+            continue;
+
+         ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal, DEAL_ENTRY);
+         if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY)
+            continue;
+
+         //--- One entry per position, however many deals closed it.
+         long position_id = (long)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+         bool already = false;
+         for(int k = 0; k < ArraySize(reported_ids); k++)
+            if(reported_ids[k] == position_id)
+              { already = true; break; }
+         if(already)
+            continue;
+         int n = ArraySize(reported_ids);
+         ArrayResize(reported_ids, n + 1);
+         reported_ids[n] = position_id;
+
+         //--- The realised numbers are summed across every deal of the
+         //--- position that falls inside the window: a partial close is two
+         //--- OUT deals, and swap and commission can sit on either side.
+         double   profit = 0.0, swap = 0.0, commission = 0.0, close_price = 0.0;
+         datetime closed_at = 0;
+
+         for(int j = 0; j < deals; j++)
+           {
+            ulong d = HistoryDealGetTicket(j);
+            if(d == 0)
+               continue;
+            if((long)HistoryDealGetInteger(d, DEAL_POSITION_ID) != position_id)
+               continue;
+
+            swap       += HistoryDealGetDouble(d, DEAL_SWAP);
+            commission += HistoryDealGetDouble(d, DEAL_COMMISSION);
+
+            ENUM_DEAL_ENTRY e = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(d, DEAL_ENTRY);
+            if(e != DEAL_ENTRY_OUT && e != DEAL_ENTRY_OUT_BY)
+               continue;
+
+            profit += HistoryDealGetDouble(d, DEAL_PROFIT);
+            datetime t = (datetime)HistoryDealGetInteger(d, DEAL_TIME);
+            if(t >= closed_at)
+              {
+               closed_at   = t;
+               close_price = HistoryDealGetDouble(d, DEAL_PRICE);
+              }
+           }
+
+         if(closed_written > 0)
+            json += ",";
+         closed_written++;
+
+         //--- The position id is what the platform knows the position by: it
+         //--- is the same number PositionGetTicket reported while it was open.
+         json += "{";
+         json += "\"ticket\":\"" + IntegerToString(position_id) + "\",";
+         json += "\"close_price\":\"" + DoubleToString(close_price, digits) + "\",";
+         json += "\"profit\":\"" + DoubleToString(profit, 2) + "\",";
+         json += "\"swap\":\"" + DoubleToString(swap, 2) + "\",";
+         json += "\"commission\":\"" + DoubleToString(commission, 2) + "\",";
+         json += "\"closed_at\":\"" + IsoTime(closed_at) + "\"";
+         json += "}";
+        }
+     }
+   json += "],";
+
+   //--- Resting orders. Only a reversal strategy places any, but the list is
+   //--- always sent, so the platform clears whatever is no longer there.
+   json += "\"orders\":[";
+   int orders_written = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0 || !OrderSelect(ticket))
+         continue;
+      if(OrderGetInteger(ORDER_MAGIC) != InpMagicNumber || OrderGetString(ORDER_SYMBOL) != _Symbol)
+         continue;
+
+      string order_type;
+      switch((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE))
+        {
+         case ORDER_TYPE_BUY_STOP:   order_type = "buy_stop";   break;
+         case ORDER_TYPE_SELL_STOP:  order_type = "sell_stop";  break;
+         case ORDER_TYPE_BUY_LIMIT:  order_type = "buy_limit";  break;
+         case ORDER_TYPE_SELL_LIMIT: order_type = "sell_limit"; break;
+         default: continue;
+        }
+
+      if(orders_written > 0)
+         json += ",";
+      orders_written++;
+
+      json += "{";
+      json += "\"ticket\":\"" + IntegerToString((long)ticket) + "\",";
+      json += "\"order_type\":\"" + order_type + "\",";
+      json += "\"volume\":\"" + DoubleToString(OrderGetDouble(ORDER_VOLUME_CURRENT), 2) + "\",";
+      json += "\"price\":\"" + DoubleToString(OrderGetDouble(ORDER_PRICE_OPEN), digits) + "\",";
+      json += "\"placed_at\":\"" + IsoTime((datetime)OrderGetInteger(ORDER_TIME_SETUP)) + "\"";
+      json += "}";
+     }
+   json += "]";
 
    json += "}";
    return json;

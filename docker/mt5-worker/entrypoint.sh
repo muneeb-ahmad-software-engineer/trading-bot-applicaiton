@@ -9,6 +9,9 @@ set -euo pipefail
 BASE="${MT5_DISPLAY_BASE:-100}"
 COUNT="${MT5_MAX_INSTANCES:-10}"
 
+# Clean up stale X locks and sockets left behind by a killed container
+rm -f /tmp/.X*-lock /tmp/.X11-unix/X*
+
 for ((i = 0; i < COUNT; i++)); do
   display=$((BASE + i))
   # -nolisten tcp: these displays exist for Wine inside this container and have

@@ -58,6 +58,7 @@ module Mt5
         end
 
         build_terminal_tree(instance)
+        seed_wine_prefix(instance)
         write_terminal_config(instance, context)
         write_ea_config(instance, context)
 
@@ -70,7 +71,14 @@ module Mt5
       end
 
       def start(instance)
-        return ok(pid: instance.pid, process_token: instance.process_token, details: { already_running: true }) if alive?(instance)
+        # Found by its directory as well as its pid. A second terminal64.exe in
+        # the same /portable tree does not run: it hands focus to the one
+        # already there and exits, which the reconciler would read as a crash
+        # and answer with another spawn — a loop that ends only at the
+        # crash-loop cap, while the original terminal carries on unseen.
+        if (running = current_pid(instance))
+          return ok(pid: running, process_token: instance.process_token, details: { already_running: true })
+        end
 
         return failure("terminal_missing", "MT5 terminal binary is not installed on this node.") unless File.exist?(instance.terminal_binary)
 
@@ -98,13 +106,11 @@ module Mt5
 
       def stop(instance, timeout: nil)
         timeout ||= Mt5Instance::STOP_TIMEOUT
-        pid = instance.pid
 
-        return ok(details: { already_stopped: true }) if pid.blank? || !alive?(instance)
+        pids = live_pids(instance)
+        return ok(details: { already_stopped: true }) if pids.empty?
 
-        # The whole process group: Wine spawns helpers, and signalling only the
-        # parent leaves them holding the display and the data directory.
-        signal_group(pid, "TERM")
+        pids.each { |pid| signal(pid, "TERM") }
 
         deadline = Time.current + timeout
         sleep_interval = 0.2
@@ -114,25 +120,32 @@ module Mt5
           sleep sleep_interval
         end
 
-        signal_group(pid, "KILL")
+        live_pids(instance).each { |pid| signal(pid, "KILL") }
         sleep sleep_interval
         finish_stop(instance, graceful: false)
       end
 
-      # Two questions, both of which must be yes: is there a process with this
-      # pid, and is it ours? PIDs are reused after a reboot, and signalling a
-      # stranger's process on a shared host is not a recoverable mistake.
-      def alive?(instance)
-        pid = instance.pid
-        return false if pid.blank?
-        return false unless process_exists?(pid)
+      def alive?(instance) = live_pids(instance).any?
 
-        recorded = instance.process_token
-        return true if recorded.blank?
+      def current_pid(instance) = live_pids(instance).first
 
-        File.exist?(instance.token_file) && File.read(instance.token_file).strip == recorded
-      rescue SystemCallError
-        false
+      # The last few lines from MetaTrader's journal and the EA's log that say
+      # something went wrong: a refused login, a lost connection, a rejected
+      # API token. These are what a user needs to see when a terminal will not
+      # connect, and until now they sat in UTF-16 files nobody could reach.
+      def diagnostics(instance, limit: 5)
+        entries = log_entries(File.join(instance.terminal_dir, "logs"), JOURNAL_PROBLEM) +
+                  log_entries(File.join(instance.mql5_dir, "Logs"), EA_PROBLEM)
+
+        # Only what this run, or the one just before it, said. A rejected token
+        # from before the user fixed it and retried is not the reason now.
+        since = (instance.started_at || 1.day.ago) - 10.minutes
+        entries = entries.select { |entry| entry[:at] >= since }
+
+        # The EA repeats a failing call every thirty seconds; once is enough.
+        entries.sort_by { |entry| entry[:at] }.reverse.uniq { |entry| entry[:message] }.first(limit).reverse
+      rescue SystemCallError, EncodingError
+        []
       end
 
       def destroy(instance)
@@ -208,6 +221,44 @@ module Mt5
         File.chmod(FILE_MODE, target)
       end
 
+      # Wine registry files the template prefix carries, and every instance
+      # prefix must inherit. MetaTrader keys the encryption of common.ini's
+      # WebRequest whitelist to the Windows identity Wine presents — which
+      # lives in these files — so a whitelist typed in under the template's
+      # prefix decrypts only under a prefix with the same registry. A fresh
+      # prefix gets a fresh identity, MetaTrader silently fails to decrypt the
+      # URL list, and every instance dies with "URL not allowed (4014)" while
+      # holding a byte-identical copy of a working common.ini. Proven both
+      # ways on a live instance: fresh registry → 4014, template registry →
+      # "platform reachable", with nothing else changed.
+      PREFIX_REGISTRY_FILES = %w[system.reg user.reg userdef.reg].freeze
+
+      # The prefix the template was prepared in — the template installation
+      # lives at <prefix>/drive_c/Program Files/MetaTrader 5, so the prefix is
+      # three levels up from the template directory.
+      def template_prefix_dir = File.expand_path("../../..", template_dir)
+
+      # Seeds the instance's Wine prefix with the template's registry before
+      # Wine ever runs in it. Wine treats a directory that already holds
+      # registry files as an existing prefix: it fills in drive_c and the
+      # rest on first run and keeps the registry — and with it the identity
+      # the whitelist was encrypted under. The prefix stays per-instance and
+      # writable only by the instance; what is shared is the identity, not
+      # the files.
+      def seed_wine_prefix(instance)
+        prefix = File.join(instance.instance_dir, "wine")
+        FileUtils.mkdir_p(prefix, mode: DIR_MODE)
+
+        PREFIX_REGISTRY_FILES.each do |name|
+          source = File.join(template_prefix_dir, name)
+          next unless File.exist?(source)
+
+          target = File.join(prefix, name)
+          FileUtils.cp(source, target)
+          File.chmod(FILE_MODE, target)
+        end
+      end
+
       # Hard-linked where the filesystem allows it, symlinked otherwise.
       #
       # terminal64.exe is 116 MB and /portable resolves its data directory from
@@ -227,11 +278,17 @@ module Mt5
           begin
             FileUtils.ln(source, target, force: true)
           rescue Errno::EXDEV, Errno::EPERM, NotImplementedError
-            # A different filesystem, or one that will not hard-link. Falls back
-            # rather than failing: a symlinked executable still runs, it merely
-            # costs the instance its own /portable root, which is why this is
-            # the fallback and not the default.
-            FileUtils.ln_s(source, target, force: true)
+            # A different filesystem, or one that will not hard-link — which is
+            # the normal case under Docker, where the template and the
+            # instances are separate volumes. The fallback is a copy, not a
+            # symlink: a symlinked terminal64.exe boot-loops the instance as
+            # soon as MetaTrader's LiveUpdate downloads a new build, because
+            # the updater cannot swap the binary through the link — every
+            # start then exits to apply the update, fails, and exits again,
+            # until the instance is marked crash-looping. A copy costs disk
+            # (~116 MB per instance) and hands each instance its own
+            # updatable binary, which is exactly what LiveUpdate needs.
+            FileUtils.cp(source, target, preserve: true)
           end
         end
       end
@@ -274,20 +331,144 @@ module Mt5
           "DISPLAY" => ":#{instance.display_number}",
           "WINEPREFIX" => File.join(instance.instance_dir, "wine"),
           "WINEDEBUG" => "-all",
-          # Every instance gets an empty prefix, so every instance start is also
-          # a first run of Wine — and a first run offers to download Mono and
-          # Gecko, in a modal dialog, on a display nobody is watching. The
-          # terminal then waits on a button nobody will ever press. MetaTrader
-          # is native Win32 and wants neither, so both are disabled outright
-          # rather than installed.
+          # Every instance prefix starts as registry files alone (see
+          # seed_wine_prefix), so every instance start is also a first run of
+          # Wine — and a first run offers to download Mono and Gecko, in a
+          # modal dialog, on a display nobody is watching. The terminal then
+          # waits on a button nobody will ever press. MetaTrader is native
+          # Win32 and wants neither, so both are disabled outright rather
+          # than installed.
           "WINEDLLOVERRIDES" => "mscoree,mshtml=",
           "TZ" => "UTC"
         }
       end
 
+      # Every process running this instance's terminal: the one we spawned, if
+      # it is still ours, and any other that is running from its tree.
+      def live_pids(instance)
+        tracked = tracked_pid_alive?(instance) ? [ instance.pid.to_i ] : []
+        (tracked + discovered_pids(instance)).uniq
+      end
+
+      # Two questions, both of which must be yes: is there a process with this
+      # pid, and is it ours? PIDs are reused after a reboot, and signalling a
+      # stranger's process on a shared host is not a recoverable mistake.
+      def tracked_pid_alive?(instance)
+        pid = instance.pid
+        return false if pid.blank?
+        return false unless process_exists?(pid)
+
+        recorded = instance.process_token
+        return true if recorded.blank?
+
+        File.exist?(instance.token_file) && File.read(instance.token_file).strip == recorded
+      rescue SystemCallError
+        false
+      end
+
+      # Terminals found by what they are running rather than by the pid we
+      # recorded.
+      #
+      # MetaTrader's LiveUpdate applies an update by exiting and relaunching
+      # itself through an updater, so the pid we spawned disappears while the
+      # terminal carries on — logged in, reporting, trading — under one we never
+      # saw. Judged by the spawned pid alone, that terminal is a crash, and
+      # every restart after it is a second copy that exits at once.
+      #
+      # Identified by the instance's uuid on the command line: the updater and
+      # the relaunched terminal both carry this instance's /path or /config,
+      # and no other instance's tree contains it, so the match cannot reach
+      # another user's terminal. /proc is Linux-only; elsewhere this finds
+      # nothing and the spawned pid is all there is to go on.
+      def discovered_pids(instance)
+        needle = instance.uuid.to_s.downcase
+        return [] if needle.blank?
+
+        Dir.glob("/proc/[0-9]*/cmdline").filter_map do |path|
+          command = File.binread(path).tr("\0", " ").downcase
+          next unless command.include?(needle) && command.include?("terminal64.exe")
+
+          pid = path[%r{\A/proc/(\d+)/}, 1].to_i
+          pid unless pid == Process.pid
+        rescue SystemCallError
+          # Exited between the glob and the read.
+          nil
+        end
+      end
+
+      # The whole process group for a pid we spawned, because Wine starts
+      # helpers and signalling only the parent leaves them holding the display
+      # and the data directory. A relaunched terminal leads no group of its
+      # own, so it is signalled alone.
+      def signal(pid, signal_name)
+        target = Process.getpgid(pid) == pid ? -pid : pid
+        Process.kill(signal_name, target)
+      rescue Errno::ESRCH
+        nil
+      rescue Errno::EPERM
+        Rails.logger.warn("mt5.signal_denied pid=#{pid} signal=#{signal_name}")
+      end
+
+      # ----------------------------------------------------------- Diagnostics
+
+      # MetaTrader journal lines worth showing: its own warnings and errors
+      # about the broker connection, and a refused login, which it logs at
+      # level 0. MQL5.community, Virtual Hosting, LiveUpdate and the tester
+      # complain constantly under Wine and none of it stops a terminal trading.
+      JOURNAL_PROBLEM = /\A\S*\t(?:[12]\t[^\t]*\t(?:Network|Terminal|Experts|Trades)\t|[^\t]*\t[^\t]*\tNetwork\t.*authorization .*failed)/
+
+      # The EA's own complaints: alerts it raised, and calls to the platform
+      # that failed.
+      EA_PROBLEM = /Alert:|rejected|failed|not allowed|error/i
+
+      # How much of a log's end to read. Enough for the last hour or so of a
+      # busy terminal, small enough to read on every page view.
+      LOG_TAIL_BYTES = 64 * 1024
+
+      def log_entries(dir, pattern)
+        date, lines = recent_log_lines(dir)
+        return [] if date.nil?
+
+        lines.grep(pattern).filter_map { |line| parse_log_line(date, line) }
+      end
+
+      # The end of the newest dated log in a directory, as [date, lines].
+      # MetaTrader writes these in UTF-16LE, one file per day.
+      def recent_log_lines(dir)
+        path = Dir.glob(File.join(dir, "[0-9]*.log")).max
+        return nil if path.nil?
+
+        date = File.basename(path, ".log")
+        size = File.size(path)
+        # Even, so the read starts on a UTF-16 code unit.
+        offset = [ size - LOG_TAIL_BYTES, 0 ].max & ~1
+        bytes = File.open(path, "rb") { |file| file.seek(offset) && file.read }
+
+        lines = bytes.force_encoding(Encoding::UTF_16LE)
+                     .encode(Encoding::UTF_8, invalid: :replace, undef: :replace)
+                     .delete("﻿").split(/\r?\n/)
+        # A tail starts mid-line.
+        lines.shift if offset.positive?
+        [ date, lines ]
+      end
+
+      def parse_log_line(date, line)
+        _code, level, time, source, *message = line.split("\t")
+        return nil if message.empty?
+
+        {
+          at: Time.strptime("#{date} #{time}", "%Y%m%d %H:%M:%S.%L").utc,
+          level: level.to_i,
+          source: source.to_s.strip,
+          message: message.join(" ").strip.truncate(300)
+        }
+      rescue ArgumentError
+        nil
+      end
+
       def process_exists?(pid)
         Process.kill(0, pid.to_i)
-        true
+        !zombie?(pid)
       rescue Errno::ESRCH
         false
       rescue Errno::EPERM
@@ -296,12 +477,16 @@ module Mt5
         true
       end
 
-      def signal_group(pid, signal)
-        Process.kill(signal, -pid.to_i)
-      rescue Errno::ESRCH
-        nil
-      rescue Errno::EPERM
-        Rails.logger.warn("mt5.signal_denied pid=#{pid} signal=#{signal}")
+      # Exited, but not yet reaped. A terminal whose spawning process has gone
+      # is reparented to PID 1, and in the container that is Puma, which never
+      # reaps — so a dead terminal lingers as a zombie that signal 0 still
+      # reaches, and would read as running indefinitely.
+      def zombie?(pid)
+        # The name in parentheses may itself contain ") ", so split on the last.
+        File.read("/proc/#{pid.to_i}/stat").rpartition(") ").last.start_with?("Z")
+      rescue SystemCallError
+        # No /proc (not Linux), or it exited between the two checks.
+        false
       end
 
       def finish_stop(instance, graceful:)

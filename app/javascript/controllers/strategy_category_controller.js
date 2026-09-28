@@ -20,11 +20,12 @@ export default class extends Controller {
 
     this.toggle(this.gridTargets, category === "grid")
 
-    // A trailing strategy has no other exit, so its distance is mandatory.
+    // A trailing or reversal strategy has no other exit, so its distance is
+    // mandatory.
     // Marking it required here matches the model, and keeps the browser from
     // letting an empty form reach the server for no reason.
     this.trailingRequiredTargets.forEach((field) => {
-      field.required = category === "trailing"
+      field.required = category !== "grid"
     })
   }
 

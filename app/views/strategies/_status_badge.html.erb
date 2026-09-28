@@ -1,5 +1,10 @@
+<%#
+  executing: whether a terminal is actually running this strategy. Optional —
+  when it is false a running strategy says so, rather than a plain green
+  "Running" over a terminal that is down.
+%>
 <% case strategy.status
-   when "running" %><%= render "components/badge", label: "Running", variant: :success %>
+   when "running" %><% if local_assigns[:executing] == false %><%= render "components/badge", label: "Running · terminal offline", variant: :warning %><% else %><%= render "components/badge", label: "Running", variant: :success %><% end %>
 <% when "stopped" %><%= render "components/badge", label: "Stopped", variant: :neutral %>
 <% else %><%= render "components/badge", label: "Draft", variant: :warning %>
 <% end %>

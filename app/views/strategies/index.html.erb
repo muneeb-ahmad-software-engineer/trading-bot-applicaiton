@@ -17,15 +17,16 @@
                 <h2 class="heading-4"><%= strategy.name %></h2>
                 <p class="caption mono mt-1">
                   <%= strategy.symbol %> · <%= strategy.direction %> ·
-                  <%= strategy.category_trailing? ? "trailing" : "grid" %>
+                  <%= strategy.category %>
                 </p>
               </div>
-              <%= render "strategies/status_badge", strategy: strategy %>
+              <%= render "strategies/status_badge", strategy:,
+                         executing: terminal_executing?(connection: strategy.terminal_connection, instance: @instance, strategy:) %>
             </div>
             <%# A trailing strategy has no levels or spacing, so the card shows what
                 it does have rather than three dashes where the numbers used to be. %>
             <dl class="mt-4 grid grid-cols-3 gap-3">
-              <% if strategy.category_trailing? %>
+              <% if strategy.single_position? %>
                 <div class="stat"><dt class="stat-label">Trail</dt><dd class="figure-sm"><%= strategy.trailing_stop_points %></dd></div>
                 <div class="stat"><dt class="stat-label">Step</dt><dd class="figure-sm"><%= strategy.trailing_step_points %></dd></div>
               <% else %>

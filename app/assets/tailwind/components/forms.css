@@ -151,4 +151,51 @@
   .field-wide {
     @apply sm:col-span-2;
   }
+
+  /* ------------------------------------------------ Setting explanations */
+
+  /* A label with an (i) button beside it. The row is the anchor the
+     explanation opens under, so it lines up with the field's left edge. */
+  .label-row {
+    @apply relative flex items-center gap-1.5;
+  }
+
+  .info-tip {
+    @apply inline-flex;
+  }
+
+  /* 24px hit area around a 16px icon, so it is easy to tap. */
+  .info-tip-trigger {
+    @apply -m-1 inline-flex size-6 shrink-0 cursor-help items-center justify-center
+           rounded-full text-text-muted;
+    transition: color var(--duration-fast);
+  }
+
+  .info-tip-trigger:hover,
+  .info-tip[data-open] .info-tip-trigger {
+    @apply text-primary;
+  }
+
+  .info-tip-trigger:focus-visible {
+    @apply text-primary outline-2 outline-offset-2 outline-primary;
+  }
+
+  .info-tip-panel {
+    @apply invisible absolute left-0 top-full z-30 mt-1.5 rounded-md border border-border-strong
+           bg-surface-elevated px-3 py-2.5 text-xs leading-relaxed font-normal
+           text-text-secondary opacity-0 shadow-lg;
+    width: max-content;
+    max-width: min(22rem, calc(100vw - 3rem));
+    white-space: normal;
+    /* A short delay before hiding, so the pointer can cross from the icon to
+       the text without it vanishing on the way. */
+    transition: opacity var(--duration-fast) 120ms, visibility 0s 220ms;
+  }
+
+  .info-tip:not([data-dismissed]):hover .info-tip-panel,
+  .info-tip:not([data-dismissed]):has(.info-tip-trigger:focus-visible) .info-tip-panel,
+  .info-tip[data-open] .info-tip-panel {
+    @apply visible opacity-100;
+    transition: opacity var(--duration-fast);
+  }
 }

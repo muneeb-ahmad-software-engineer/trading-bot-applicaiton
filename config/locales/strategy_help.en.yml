@@ -1,0 +1,84 @@
+# Plain-language help for every strategy setting, shown behind the (i) icon
+# on the strategy form and the strategy page. Written for someone who has never
+# traded: no jargon without an explanation, and a gold example wherever a
+# number is involved. On gold, 100 points = $1 of price, and 0.01 lot = 1 ounce,
+# so every $1 the price moves is $1 of profit or loss per 0.01 lot.
+en:
+  strategy_help:
+    name: >-
+      A name for your own reference, so you can tell your strategies apart.
+      It has no effect on trading.
+    category: >-
+      How the robot trades.
+      Grid: opens more trades as the price moves against you, hoping to recover on the bounce back.
+      Trailing: one trade at a time, with a stop that follows the price to lock in profit.
+      Reversal: always holds one trade, and flips from buy to sell (or back) when the price turns against it.
+    direction: >-
+      Which way the robot may trade. Buy makes money when gold goes up; sell
+      makes money when gold goes down. Both lets it do either. A reversal
+      strategy needs both, because it switches between them.
+    symbol: >-
+      What is being traded. XAUUSD is gold priced in US dollars — the only
+      market this platform supports.
+    initial_lot: >-
+      How big each trade is. 0.01 lot is 1 ounce of gold (about $4,300 worth),
+      and every $1 the gold price moves is $1 of profit or loss for you. 0.10
+      lot is 10 ounces, so $10 per $1 move. Start with 0.01 while you learn.
+    lot_mode: >-
+      Grid only. Fixed: every extra trade is the same size as the first.
+      Multiplier: each extra trade is bigger than the one before, which recovers
+      faster but can lose much more.
+    lot_multiplier: >-
+      Grid only, in multiplier mode. How much bigger each extra trade is. With 2,
+      the trades go 0.01, 0.02, 0.04, 0.08… — sizes double quickly, and so does
+      the risk.
+    grid_spacing_points: >-
+      Grid only. How far the price must move against you before the next trade
+      opens. 100 points = $1 on gold, so 300 points means a new trade every $3.
+    grid_levels: >-
+      Grid only. The most trades the grid may open in one direction. More levels
+      mean more trades — and more money at risk — if the price keeps going the
+      wrong way.
+    trailing_stop_points: >-
+      The most profit you are willing to give back, and the most a new trade can
+      lose. 100 points = $1 on gold. With 300 points: a buy opened at $4,300
+      starts with its stop at $4,297; if gold rises to $4,310 the stop moves up
+      to $4,307. It never moves back. In a reversal strategy this is also how
+      far the price must turn before the robot flips direction.
+    trailing_activation_points: >-
+      How much profit a trade must reach before the stop starts following the
+      price. 100 points = $1. Leave it empty to start following straight away.
+      Not used by a reversal strategy, which always follows from the start.
+    trailing_step_points: >-
+      The smallest move the stop makes at a time. 10 points = 10 cents. It stops
+      the robot from pestering your broker on every tiny price flicker. Leave it
+      empty for the default.
+    basket_take_profit: >-
+      Close all open trades together once their combined profit reaches this
+      many dollars. Example: 20 closes everything at $20 profit. Leave empty for
+      no limit.
+    basket_stop_loss: >-
+      Close all open trades together once their combined loss reaches this many
+      dollars. Example: 50 closes everything at a $50 loss. Leave empty for no
+      limit.
+    max_positions: >-
+      The most trades the robot may have open at the same time. A safety limit —
+      it will not open more, whatever the strategy wants.
+    max_exposure_lots: >-
+      The most gold, in lots, the robot may hold in total across all open trades.
+      0.10 means at most 10 ounces at once. Must be at least as big as the
+      strategy's own trades.
+    max_drawdown_percent: >-
+      A safety brake. If your account value drops this many percent below its
+      highest point, the robot stops opening new trades. Example: 10 stops at a
+      10% fall. Leave empty for no brake.
+    min_margin_level_percent: >-
+      A safety brake based on how much spare money your account has. Margin is
+      the deposit your broker holds while trades are open. If the margin level
+      falls below this percentage, the robot stops opening new trades. Leave
+      empty for no brake.
+    max_spread_points: >-
+      The spread is the small gap between the buy price and the sell price —
+      a cost you pay on every trade. It widens during news or quiet hours. The
+      robot will not open a trade at market while it is wider than this. 100
+      points = $1.

@@ -229,7 +229,114 @@ class LocalRuntimeTest < ActiveSupport::TestCase
     end
   end
 
+  # ------------------------------------------------------- Finding the process
+
+  # LiveUpdate applies an update by exiting and relaunching MetaTrader, so the
+  # pid we spawned goes away while the terminal carries on. Judged by that pid
+  # alone, a healthy terminal was a crash every minute, and every restart a
+  # second copy that exited at once — until the crash-loop cap stopped trying.
+  test "a terminal relaunched under a pid we did not spawn is still alive" do
+    with_local_runtime do
+      instance = provision!(@user)
+      instance.update_columns(pid: 999_999_999, process_token: nil)
+      runtime = Mt5::Runtime::Local.new(instance.worker_node)
+
+      with_discovered_pids([ 4242 ]) do
+        assert runtime.alive?(instance)
+        assert_equal 4242, runtime.current_pid(instance)
+      end
+
+      with_discovered_pids([]) { assert_not runtime.alive?(instance) }
+    end
+  end
+
+  test "start does not spawn a second terminal into a tree one is already running from" do
+    with_local_runtime do
+      instance = provision!(@user)
+      runtime = Mt5::Runtime::Local.new(instance.worker_node)
+      runtime.define_singleton_method(:spawn_terminal) { |_| flunk "spawned a second terminal" }
+
+      with_discovered_pids([ 4242 ]) do
+        result = runtime.start(instance)
+
+        assert_predicate result, :ok?
+        assert_equal 4242, result.pid
+        assert result.details[:already_running]
+      end
+    end
+  end
+
+  test "the reconciler adopts a relaunched terminal rather than calling it a crash" do
+    with_local_runtime do
+      instance = provision!(@user)
+      instance.update_columns(state: "running", desired_state: "running", pid: 999_999_999,
+                              process_token: nil, last_heartbeat_at: Time.current)
+
+      with_discovered_pids([ 4242 ]) { Mt5::Reconcile.call(instance:) }
+
+      instance.reload
+      assert_predicate instance, :running?
+      assert_equal 4242, instance.pid
+      assert_equal 0, instance.consecutive_failures
+    end
+  end
+
+  # ------------------------------------------------------------- Diagnostics
+
+  test "diagnostics surface what MetaTrader and the EA said went wrong, once each" do
+    with_local_runtime do
+      instance = provision!(@user)
+      instance.update_columns(started_at: Time.utc(2026, 9, 28, 16, 0))
+      runtime = Mt5::Runtime::Local.new(instance.worker_node)
+
+      write_log(File.join(instance.terminal_dir, "logs"), [
+        "AA\t0\t16:13:15.556\tTerminal\tMetaTrader 5 x64 build 6230 started",
+        "BB\t0\t16:13:30.164\tNetwork\t'500123': authorization on Demo-Server failed (Invalid account)",
+        "CC\t2\t16:19:11.321\tMQL5.community\tauthorization failed",
+        "DD\t2\t16:20:17.791\tLiveUpdate\tdownload 'MT5CLWIDE64' failed",
+        "EE\t1\t16:36:23.167\tNetwork\t'500123': connection to Demo-Server lost"
+      ])
+      write_log(File.join(instance.mql5_dir, "Logs"), [
+        "FF\t0\t16:34:31.513\tGoldGrid (XAUUSD,M15)\tGoldGrid: configuration refresh failed — API token rejected.",
+        "GG\t0\t16:35:01.513\tGoldGrid (XAUUSD,M15)\tGoldGrid: configuration refresh failed — API token rejected.",
+        "HH\t0\t16:35:02.000\tGoldGrid (XAUUSD,M15)\tGoldGrid: platform reachable."
+      ])
+
+      messages = runtime.diagnostics(instance).map { |entry| entry[:message] }
+
+      assert_equal [
+        "'500123': authorization on Demo-Server failed (Invalid account)",
+        "GoldGrid: configuration refresh failed — API token rejected.",
+        "'500123': connection to Demo-Server lost"
+      ], messages
+    end
+  end
+
+  test "diagnostics are empty for a terminal that has never written a log" do
+    with_local_runtime do
+      instance = provision!(@user)
+
+      assert_equal [], Mt5::Runtime::Local.new(instance.worker_node).diagnostics(instance)
+    end
+  end
+
   private
+
+  # Stands in for scanning /proc, which only exists on Linux.
+  def with_discovered_pids(pids)
+    original = Mt5::Runtime::Local.instance_method(:discovered_pids)
+    Mt5::Runtime::Local.define_method(:discovered_pids) { |_instance| pids }
+    yield
+  ensure
+    Mt5::Runtime::Local.define_method(:discovered_pids, original)
+  end
+
+  # MetaTrader's logs are UTF-16LE with a byte-order mark, one file per day.
+  def write_log(dir, lines)
+    FileUtils.mkdir_p(dir)
+    text = "\uFEFF" + lines.map { |line| "#{line}\r\n" }.join
+    File.binwrite(File.join(dir, "20260928.log"), text.encode(Encoding::UTF_16LE))
+  end
 
   # Fails partway through building the tree, after the instance directory
   # exists — which is the only interesting moment, because that is when there

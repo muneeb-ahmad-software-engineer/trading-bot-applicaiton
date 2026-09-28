@@ -43,6 +43,15 @@ module Mt5
       # the reconciler trusts about liveness.
       def alive?(_instance) = raise NotImplementedError
 
+      # The pid of the process actually running this instance, which is not
+      # always the one that was spawned: MetaTrader relaunches itself to apply
+      # an update. Nil when nothing is running.
+      def current_pid(instance) = alive?(instance) ? instance.pid : nil
+
+      # What the terminal itself last said went wrong, newest last, for showing
+      # a user why it is not connecting. Empty when the runtime cannot tell.
+      def diagnostics(_instance) = []
+
       # Remove the instance's directory tree. Irreversible.
       def destroy(_instance) = raise NotImplementedError
 

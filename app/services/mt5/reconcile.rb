@@ -22,6 +22,7 @@ module Mt5
 
       instance.with_lock do
         alive = runtime.alive?(instance)
+        adopt_relaunched_process if alive && instance.process_expected?
 
         # Facts first. Nothing may act on desired state until the row agrees
         # with the machine, or the action will be based on a fiction.
@@ -61,6 +62,17 @@ module Mt5
       return handle_lost_heartbeat if instance.running? && !instance.heartbeat_fresh?
 
       nil
+    end
+
+    # MetaTrader relaunches itself to apply an update, so the terminal can be
+    # up under a pid other than the one we spawned. Recorded, so that stopping
+    # it later signals the process that is actually there.
+    def adopt_relaunched_process
+      pid = runtime.current_pid(instance)
+      return if pid.blank? || pid == instance.pid
+
+      log(:process_adopted, new_pid: pid)
+      instance.update!(pid:)
     end
 
     # The stop we asked for completed while we were not looking.

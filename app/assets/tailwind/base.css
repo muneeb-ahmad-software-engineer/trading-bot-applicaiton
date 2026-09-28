@@ -7,6 +7,27 @@
   html {
     color-scheme: dark;
     -webkit-text-size-adjust: 100%;
+    /* No double-tap zoom on touch devices (pinch is blocked in the viewport meta). */
+    touch-action: manipulation;
+    /* No grey flash on tapped links and buttons. */
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Native-app feel on touch devices: no visible scrollbars (scrolling still
+     works) and no rubber-band bounce at the page edges. */
+  @media (hover: none) and (pointer: coarse) {
+    html,
+    body {
+      overscroll-behavior-y: none;
+    }
+
+    * {
+      scrollbar-width: none;
+    }
+
+    *::-webkit-scrollbar {
+      display: none;
+    }
   }
 
   body {

@@ -7,7 +7,8 @@ class StrategiesController < ApplicationController
   before_action :set_strategy, only: %i[show edit update destroy start stop]
 
   def index
-    @strategies = current_user.strategies.ordered
+    @strategies = current_user.strategies.ordered.includes(:terminal_connection)
+    @instance = current_user.mt5_instances.not_terminated.first
   end
 
   def show
@@ -24,6 +25,9 @@ class StrategiesController < ApplicationController
     # question rather than left to the settings screen.
     @instance = current_user.mt5_instances.not_terminated.first
     @credential = current_user.broker_credential
+    # Read from the terminal's own logs, so only when there is something to
+    # explain.
+    @diagnostics = @instance && !@instance.healthy? ? @instance.worker_node.runtime.diagnostics(@instance) : []
   end
 
   def new

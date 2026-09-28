@@ -31,7 +31,14 @@ class Strategy < ApplicationRecord
   # strategy being deleted. Declared here so destroying a user cannot trip the
   # foreign key depending on which association happens to be listed first.
   has_one :account_state, dependent: :nullify
-  has_one :terminal_connection, dependent: :nullify
+  # One row per API token that has reported for this strategy, and a managed
+  # terminal is issued a new token every time it is pointed at a strategy — so
+  # a strategy started more than once has several. All of them are detached on
+  # delete; the one that answers "is anything reporting?" is the most recent.
+  # Unordered, has_one handed back whichever row Postgres found first, which
+  # was usually a long-dead token while a live one reported every ten seconds.
+  has_many :terminal_connections, dependent: :nullify
+  has_one :terminal_connection, -> { order(Arel.sql("last_report_at DESC NULLS LAST"), id: :desc) }
   # A terminal outlives the strategy it happened to be running: the process is
   # still there and still has to be stopped deliberately.
   has_many :mt5_instances, dependent: :nullify
@@ -46,7 +53,14 @@ class Strategy < ApplicationRecord
   # which is a different question with a different answer: a grid strategy can
   # have a trailing stop too. Asking for the category has to look like asking
   # for the category.
-  enum :category, { grid: "grid", trailing: "trailing" }, prefix: :category, validate: true
+  #
+  # A reversal strategy is always in the market on exactly one side. The
+  # position's stop and a pending order for the opposite side sit at the same
+  # price and trail together, so when price turns far enough the stop closes
+  # the position and the pending order opens its replacement, both on the
+  # broker's side.
+  enum :category, { grid: "grid", trailing: "trailing", reversal: "reversal" },
+       prefix: :category, validate: true
 
   validates :name, presence: true, length: { maximum: 80 }
   validates :symbol, inclusion: { in: SYMBOLS }
@@ -72,8 +86,9 @@ class Strategy < ApplicationRecord
 
   # The loss margin the user is willing to give back from the best price seen.
   # Required for a trailing strategy, optional on a grid, where it is an extra
-  # exit layered on top of the basket targets.
-  validates :trailing_stop_points, presence: true, if: :category_trailing?
+  # exit layered on top of the basket targets. For a reversal strategy it is
+  # the reversal distance: how far the opposite order trails behind price.
+  validates :trailing_stop_points, presence: true, unless: :category_grid?
   validates :trailing_stop_points,
             numericality: { only_integer: true, greater_than: 0, less_than_or_equal_to: 100_000 },
             allow_nil: true
@@ -88,6 +103,7 @@ class Strategy < ApplicationRecord
 
   validate :trailing_settings_need_a_distance
   validate :trailing_step_fits_inside_the_distance
+  validate :reversal_trails_both_sides_from_the_start
 
   # ---------------------------------------------------------- Risk controls
 
@@ -145,14 +161,18 @@ class Strategy < ApplicationRecord
 
   # The number of baskets this strategy can run at once. A both-directions
   # strategy can hold a buy side and a sell side simultaneously.
-  def concurrent_directions = direction_both? ? 2 : 1
+  def concurrent_directions = direction_both? && !category_reversal? ? 2 : 1
+
+  # Whether the strategy's positions are opened one at a time and exited only
+  # by their stop, rather than averaged into a grid.
+  def single_position? = !category_grid?
 
   # The largest total volume this configuration could ever open, used to warn a
   # user before their exposure ceiling silently truncates the strategy.
   def maximum_theoretical_lots
     # A trailing strategy holds one position per direction, and re-enters only
     # once the previous one has closed. Its ceiling is the entry size itself.
-    return (initial_lot.to_d * concurrent_directions).round(2) if category_trailing?
+    return (initial_lot.to_d * concurrent_directions).round(2) if single_position?
 
     if lot_mode_multiplier? && lot_multiplier.to_d > 1
       # Geometric series: a(rⁿ − 1) / (r − 1)
@@ -200,6 +220,22 @@ class Strategy < ApplicationRecord
       "cannot exceed the trailing distance (#{trailing_stop_points} points) — the stop would never move")
   end
 
+  # The opposite order has to be trailing from the moment a position opens, or
+  # a reversal strategy is just an unprotected position waiting to activate.
+  # And a reversal alternates between buy and sell by definition, so limiting
+  # it to one side would describe a different strategy.
+  def reversal_trails_both_sides_from_the_start
+    return unless category_reversal?
+
+    if trailing_activation_points.present?
+      errors.add(:trailing_activation_points,
+        "must be blank for a reversal strategy — the opposite order trails from the moment a position opens")
+    end
+    unless direction_both?
+      errors.add(:direction, "must be both directions for a reversal strategy — it alternates between buy and sell")
+    end
+  end
+
   def grid_levels_within_max_positions
     return unless category_grid?
     return if grid_levels.blank? || max_positions.blank?
@@ -219,7 +255,7 @@ class Strategy < ApplicationRecord
   end
 
   def exposure_shortfall_message
-    if category_trailing?
+    if single_position?
       "is below what this strategy can open (#{readable_maximum_lots} lots). " \
       "Raise the ceiling or lower the entry lot size."
     else

@@ -193,4 +193,28 @@ class StrategiesTest < ActionDispatch::IntegrationTest
     assert_predicate strategy, :category_trailing?
     assert_nil strategy.grid_levels
   end
+  # ------------------------------------------------ Setting explanations
+
+  test "every field on the strategy form has a plain-language explanation" do
+    get new_strategy_path
+
+    assert_response :success
+    # Every control the form submits, except the name-less symbol display.
+    fields = css_select("[name^='strategy[']").map { |c| c["name"][/strategy\[(\w+)\]/, 1] }.uniq
+    assert_not_empty fields
+
+    fields.each do |field|
+      assert_select "button.info-tip-trigger[aria-describedby='#{field}_info']", 1,
+        "#{field} has no (i) explanation"
+      assert_select "##{field}_info[role=tooltip]", text: I18n.t("strategy_help.#{field}")
+    end
+  end
+
+  test "every setting on the strategy page has the same explanation as the form" do
+    get strategy_path(users(:verified).strategies.create!(TRAILING))
+
+    assert_response :success
+    assert_select "#trailing_stop_points_info", text: I18n.t("strategy_help.trailing_stop_points")
+    assert_select "#max_exposure_lots_info", text: I18n.t("strategy_help.max_exposure_lots")
+  end
 end

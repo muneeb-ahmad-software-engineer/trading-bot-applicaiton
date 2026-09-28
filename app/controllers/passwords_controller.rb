@@ -27,9 +27,17 @@ class PasswordsController < ApplicationController
       # issued API token. If the account was compromised, the reset is what
       # actually evicts the attacker — including any MT5 or mobile client they
       # had connected.
-      revoked = @user.api_tokens.active.count
+      #
+      # Except the tokens the platform issued to its own managed terminals.
+      # Their plaintext exists only in the terminal's configuration on the
+      # worker node — no browser or client ever sees it — so revoking one
+      # evicts no attacker. It only cuts the user's running terminal off from
+      # the platform, leaving open positions trading on stale configuration
+      # and invisible to the dashboard.
+      revocable = @user.api_tokens.active.where.missing(:mt5_instance)
+      revoked = revocable.count
       @user.sessions.destroy_all
-      @user.api_tokens.active.find_each(&:revoke!)
+      revocable.find_each(&:revoke!)
 
       Event.record("password.changed", user: @user, ip_address: request.remote_ip,
                    metadata: { api_tokens_revoked: revoked })

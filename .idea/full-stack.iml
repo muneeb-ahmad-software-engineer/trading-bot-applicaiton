@@ -73,6 +73,7 @@
     <orderEntry type="library" scope="PROVIDED" name="irb (v1.18.0, rbenv: 3.4.10) [gem]" level="application" />
     <orderEntry type="library" scope="PROVIDED" name="jbuilder (v2.15.1, rbenv: 3.4.10) [gem]" level="application" />
     <orderEntry type="library" scope="PROVIDED" name="json (v2.21.2, rbenv: 3.4.10) [gem]" level="application" />
+    <orderEntry type="library" scope="PROVIDED" name="jwt (v3.2.0, rbenv: 3.4.10) [gem]" level="application" />
     <orderEntry type="library" scope="PROVIDED" name="kamal (v2.12.0, rbenv: 3.4.10) [gem]" level="application" />
     <orderEntry type="library" scope="PROVIDED" name="language_server-protocol (v3.17.0.6, rbenv: 3.4.10) [gem]" level="application" />
     <orderEntry type="library" scope="PROVIDED" name="launchy (v3.1.1, rbenv: 3.4.10) [gem]" level="application" />
@@ -96,6 +97,7 @@
     <orderEntry type="library" scope="PROVIDED" name="net-ssh (v7.3.3, rbenv: 3.4.10) [gem]" level="application" />
     <orderEntry type="library" scope="PROVIDED" name="nio4r (v2.7.5, rbenv: 3.4.10) [gem]" level="application" />
     <orderEntry type="library" scope="PROVIDED" name="nokogiri (v1.19.4, rbenv: 3.4.10) [gem]" level="application" />
+    <orderEntry type="library" scope="PROVIDED" name="openssl (v4.0.2, rbenv: 3.4.10) [gem]" level="application" />
     <orderEntry type="library" scope="PROVIDED" name="ostruct (v0.6.3, rbenv: 3.4.10) [gem]" level="application" />
     <orderEntry type="library" scope="PROVIDED" name="parallel (v2.2.0, rbenv: 3.4.10) [gem]" level="application" />
     <orderEntry type="library" scope="PROVIDED" name="parser (v3.3.12.0, rbenv: 3.4.10) [gem]" level="application" />
@@ -153,6 +155,7 @@
     <orderEntry type="library" scope="PROVIDED" name="uri (v1.1.1, rbenv: 3.4.10) [gem]" level="application" />
     <orderEntry type="library" scope="PROVIDED" name="useragent (v0.16.11, rbenv: 3.4.10) [gem]" level="application" />
     <orderEntry type="library" scope="PROVIDED" name="web-console (v4.3.0, rbenv: 3.4.10) [gem]" level="application" />
+    <orderEntry type="library" scope="PROVIDED" name="web-push (v3.1.0, rbenv: 3.4.10) [gem]" level="application" />
     <orderEntry type="library" scope="PROVIDED" name="websocket (v1.2.11, rbenv: 3.4.10) [gem]" level="application" />
     <orderEntry type="library" scope="PROVIDED" name="websocket-driver (v0.8.2, rbenv: 3.4.10) [gem]" level="application" />
     <orderEntry type="library" scope="PROVIDED" name="websocket-extensions (v0.1.5, rbenv: 3.4.10) [gem]" level="application" />
@@ -194,6 +197,9 @@
     <entry key="config/cable">
       <value>file://$MODULE_DIR$/config/cable.yml</value>
     </entry>
+    <entry key="config/cache">
+      <value>file://$MODULE_DIR$/config/cache.yml</value>
+    </entry>
     <entry key="config/database">
       <value>file://$MODULE_DIR$/config/database.yml</value>
     </entry>
@@ -215,8 +221,8 @@
     <entry key="config/routes.rb">
       <value>file://$MODULE_DIR$/config/routes.rb</value>
     </entry>
-    <entry key="config/secrets">
-      <value>file://$MODULE_DIR$/config</value>
+    <entry key="config/solid_cache">
+      <value>file://$MODULE_DIR$/config/solid_cache.yml</value>
     </entry>
     <entry key="db">
       <value>file://$MODULE_DIR$/db</value>
@@ -250,6 +256,10 @@
     </entry>
     <entry key="public/stylesheets">
       <value>file://$MODULE_DIR$/public/stylesheets</value>
+    </entry>
+    <entry key="test/mailers/previews">
+      <value>file://$MODULE_DIR$/test/mailers/previews</value>
+      <value>file://$MODULE_DIR$/test/mailers/previews</value>
     </entry>
     <entry key="tmp">
       <value>file://$MODULE_DIR$/tmp</value>

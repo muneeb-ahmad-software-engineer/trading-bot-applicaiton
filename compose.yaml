@@ -27,6 +27,9 @@ services:
     build:
       context: .
       dockerfile: docker/mt5-worker/Dockerfile
+    # A real init as PID 1, so terminals whose parent has exited are reaped
+    # instead of lingering as zombies. Puma, left as PID 1, never reaps them.
+    init: true
     depends_on:
       db:
         condition: service_healthy
@@ -49,6 +52,18 @@ services:
       MT5_DISPLAY_BASE: "100"
       MT5_MAX_INSTANCES: "4"
       MT5_NODE_NAME: docker-local
+
+      # Run the Solid Queue supervisor inside Puma (config/puma.rb picks this
+      # up). One container is a hard constraint of the Local runtime, so the
+      # job runner cannot be its own service — and without it the recurring
+      # jobs in config/recurring.yml never run, the node's heartbeat goes
+      # stale, and Start fails with no_capacity two minutes after boot.
+      SOLID_QUEUE_IN_PUMA: "1"
+
+      # Rebuild the Tailwind stylesheet as files change (config/puma.rb picks
+      # this up). The source is mounted, but the compiled CSS is not rebuilt by
+      # anything else in this container.
+      TAILWINDCSS_IN_PUMA: "1"
 
       # Written into every terminal's EA config. The EA calls the platform from
       # inside this same container, so loopback is correct — and it is what the

@@ -9,6 +9,23 @@
 #     priority: 2
 #     schedule: at 5am every day
 
+# Development runs the same MT5 housekeeping as production — the Local runtime
+# in Docker is real execution, and it depends on these in exactly the same way:
+# mt5_reconcile is also what keeps the worker node's heartbeat fresh, without
+# which the node stops being schedulable two minutes after boot.
+development:
+  monitor_terminals:
+    class: MonitorTerminalsJob
+    schedule: every minute
+
+  mt5_reconcile:
+    class: Mt5::ReconcileInstancesJob
+    schedule: every minute
+
+  mt5_reap_idle:
+    class: Mt5::ReapIdleInstancesJob
+    schedule: every 5 minutes
+
 production:
   # Detects situations nothing else would notice — above all, a running strategy
   # whose terminal has stopped reporting. Nothing arrives to trigger this when a

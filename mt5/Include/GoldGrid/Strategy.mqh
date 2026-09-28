@@ -21,7 +21,12 @@ enum ENUM_LOT_MODE       { LOT_FIXED, LOT_MULTIPLIER };
 //--- adding levels; a trailing strategy holds one position per direction and
 //--- manages it with its stop. Both may carry a trailing stop — the category
 //--- decides how positions are OPENED, not how they are exited.
-enum ENUM_STRATEGY_CATEGORY { CATEGORY_GRID, CATEGORY_TRAILING };
+//---
+//--- A reversal strategy is always on exactly one side. The position's stop and
+//--- a stop order for the opposite side sit at the same price and trail
+//--- together, so when price turns by the distance the broker closes the one
+//--- and opens the other — even if this terminal is offline at that moment.
+enum ENUM_STRATEGY_CATEGORY { CATEGORY_GRID, CATEGORY_TRAILING, CATEGORY_REVERSAL };
 
 struct SGridStrategy
   {
@@ -72,7 +77,7 @@ struct SGridStrategy
    //--- single position and rides it; it does not average in.
    int                LevelsPerDirection(void) const
      {
-      return category == CATEGORY_TRAILING ? 1 : grid_levels;
+      return category == CATEGORY_GRID ? grid_levels : 1;
      }
   };
 
@@ -107,7 +112,9 @@ bool ParseStrategy(CJsonNode *root, SGridStrategy &out, string &error)
    out.status = s.Get("status") != NULL ? s.Get("status").AsString("") : "";
 
    string category = s.Get("category") != NULL ? s.Get("category").AsString("grid") : "grid";
-   out.category = (category == "trailing") ? CATEGORY_TRAILING : CATEGORY_GRID;
+   if(category == "trailing")      out.category = CATEGORY_TRAILING;
+   else if(category == "reversal") out.category = CATEGORY_REVERSAL;
+   else                            out.category = CATEGORY_GRID;
 
    string direction = s.Get("direction") != NULL ? s.Get("direction").AsString("both") : "both";
    if(direction == "buy")       out.direction = GRID_BUY_ONLY;
@@ -223,6 +230,15 @@ bool ParseStrategy(CJsonNode *root, SGridStrategy &out, string &error)
       //--- would open a position and then never close it.
       if(!out.has_trailing || out.trailing_stop_points <= 0)
         { error = "A trailing strategy must have a trailing distance."; return false; }
+
+      //--- The opposite order trails from the moment a position opens. An
+      //--- activation would leave the position with a stop that never moves
+      //--- and an opposite order that never follows it.
+      if(out.category == CATEGORY_REVERSAL)
+        {
+         out.has_trailing_activation    = false;
+         out.trailing_activation_points = 0;
+        }
      }
 
    if(out.has_trailing)

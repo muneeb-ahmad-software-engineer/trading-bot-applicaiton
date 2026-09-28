@@ -36,6 +36,12 @@ plugin :tmp_restart
 # Run the Solid Queue supervisor inside of Puma for single-server deployments
 plugin :solid_queue if ENV["SOLID_QUEUE_IN_PUMA"]
 
+# Rebuild app/assets/builds/tailwind.css whenever a stylesheet or view changes.
+# The Docker dev container runs `rails server`, not bin/dev, so without this the
+# CSS is only ever as new as the last manual build — a new component's styles
+# silently missing, and whatever they were meant to hide shown on the page.
+plugin :tailwindcss if ENV["TAILWINDCSS_IN_PUMA"]
+
 # Specify the PID file. Defaults to tmp/pids/server.pid in development.
 # In other environments, only set the PID file if requested.
 pidfile ENV["PIDFILE"] if ENV["PIDFILE"]

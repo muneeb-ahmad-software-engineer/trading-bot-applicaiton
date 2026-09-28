@@ -1,0 +1,29 @@
+<%#
+  Why a managed terminal is not connected, in MetaTrader's own words, and a
+  way to try again.
+
+  instance: the user's managed terminal
+  diagnostics: [{ at:, level:, source:, message: }], newest last — possibly empty
+
+  The lines are shown verbatim. "authorization failed (Invalid account)" tells
+  a user exactly which field to fix; any paraphrase of it would be a guess.
+%>
+<% if diagnostics.present? %>
+  <div class="mt-3">
+    <p class="font-medium">Latest from MetaTrader</p>
+    <ul class="mt-1 space-y-1">
+      <% diagnostics.each do |entry| %>
+        <li class="text-sm">
+          <time class="caption" datetime="<%= entry[:at].iso8601 %>"><%= entry[:at].strftime("%H:%M:%S UTC") %></time>
+          <span class="caption">· <%= entry[:source] %></span>
+          <span class="block break-words font-mono"><%= entry[:message] %></span>
+        </li>
+      <% end %>
+    </ul>
+  </div>
+<% end %>
+
+<div class="mt-3 flex flex-wrap items-center gap-3">
+  <%= button_to "Retry connection", restart_terminal_path, method: :post, class: "btn btn-outline btn-sm" %>
+  <%= link_to "Check broker details", edit_broker_credential_path, class: "link text-sm" %>
+</div>
