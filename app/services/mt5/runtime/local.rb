@@ -452,6 +452,9 @@ module Mt5
         [ date, lines ]
       end
 
+      # Log timestamps carry no zone: MetaTrader writes the local time of the
+      # machine it runs on. The terminal is a child of this process on this
+      # machine, so strptime's local-zone reading is the right one.
       def parse_log_line(date, line)
         _code, level, time, source, *message = line.split("\t")
         return nil if message.empty?

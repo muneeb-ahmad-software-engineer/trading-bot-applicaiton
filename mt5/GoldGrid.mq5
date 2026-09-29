@@ -16,25 +16,21 @@
 //| but cannot enforce anything.                                      |
 //| ---------------------------------------------------------------- |
 //|                                                                   |
-//| Two strategy categories are supported:                            |
+//| Three strategy categories are supported:                          |
 //|   * grid     — adds levels as price moves against the basket.     |
-//|   * trailing — one position per direction, managed by a stop that |
+//|                With direction "both" the buy and sell baskets run |
+//|                independently (hedging account required).          |
+//|   * trailing — ONE position in total, managed by a stop that      |
 //|                follows price in the favourable direction only.    |
-//|   * reversal — one position at a time. A stop order for the       |
-//|                opposite side rests at the position's trailing     |
-//|                stop, so a turn of the trailing distance closes    |
-//|                the position and opens the opposite one. Flat, it  |
-//|                brackets the market with a buy stop and a sell     |
-//|                stop. Requires a hedging account.                  |
+//|   * reversal — ONE position in total. Flat, it brackets the       |
+//|                market with a buy stop and a sell stop; the first  |
+//|                to fill cancels the other. When the position's     |
+//|                trailing stop closes it, the opposite side opens   |
+//|                at market — only once the close is confirmed.      |
 //|                                                                   |
-//| Both categories run BUY and SELL independently and continuously   |
-//| when direction is "both": each side opens on its own, exits on    |
-//| its own, and opens again as soon as it is flat. Nobody has to     |
-//| restart anything between trades. This requires a HEDGING account  |
-//| — on a netting account a buy and a sell on one symbol cancel out, |
-//| and the EA refuses the second side rather than fight itself.      |
-//| A trailing stop can be configured on EITHER category. The         |
-//| category decides how positions are opened, not how they exit.     |
+//| Trailing and reversal never hold a buy and a sell together: every |
+//| entry is reconciled against the broker first, and any excess is   |
+//| closed (see EntryAllowed / StepState / Recover).                  |
 //|                                                                   |
 //| Behaviour when the strategy is stopped:                           |
 //|   * No new positions or baskets are opened.                       |
@@ -57,6 +53,8 @@
 #include "Include/GoldGrid/Api.mqh"
 #include "Include/GoldGrid/Strategy.mqh"
 #include "Include/GoldGrid/Grid.mqh"
+#include "Include/GoldGrid/State.mqh"
+#include "Include/GoldGrid/Tester.mqh"
 
 //--- Inputs -------------------------------------------------------------
 input group "Platform connection"
@@ -73,6 +71,22 @@ input group "Execution"
 input long   InpMagicNumber    = 20260906;                  // Identifies this EA's orders
 input int    InpSlippagePoints = 20;                        // Maximum price deviation
 input bool   InpAllowTrading   = false;                     // Master switch — off by default, on purpose
+input int    InpReentryCooldownSeconds = 60;                // Trailing/reversal: pause after a close before any new entry
+
+//--- Read ONLY in the Strategy Tester, which cannot reach the platform: the
+//--- strategy is built from these instead of fetched. Ignored live.
+input group "Strategy Tester only"
+input ENUM_TEST_CATEGORY InpTestCategory      = TEST_REVERSAL; // Category
+input double InpTestLot                       = 0.01;          // Entry lot
+input int    InpTestTrailingPoints            = 300;           // Trailing distance (points)
+input int    InpTestStepPoints                = 20;            // Trailing step (points)
+input int    InpTestEntryPoints               = 0;             // Entry distance, reversal (0 = trailing distance)
+input int    InpTestMaxSpreadPoints           = 0;             // Maximum spread (0 = none)
+input double InpTestMaxDailyLoss              = 0.0;           // Maximum daily loss (0 = none)
+input int    InpTestGridSpacingPoints         = 150;           // Grid spacing (grid only)
+input int    InpTestGridLevels                = 5;             // Grid levels (grid only)
+input int    InpChaosEveryMinutes             = 0;             // Chaos: inject a failure every N minutes (0 = off)
+input int    InpChaosSeed                     = 1;             // Chaos: random seed
 
 //--- How far back each report looks for closed positions to include. Six
 //--- hours, so that a platform that recorded a close from stale data — or
@@ -90,6 +104,8 @@ input bool   InpAllowTrading   = false;                     // Master switch —
 CGoldGridApi  g_api;
 CGridEngine   g_grid;
 SGridStrategy g_strategy;
+CInvariantMonitor g_monitor;   // Strategy Tester only
+CChaosEngine      g_chaos;     // Strategy Tester only
 
 //--- SCHEDULING USES A MONOTONIC CLOCK, NOT TimeCurrent().
 //---
@@ -106,7 +122,7 @@ SGridStrategy g_strategy;
 //---
 //--- Broker server time is still the right clock for anything describing WHEN
 //--- A TRADE HAPPENED, so IsoTime() below keeps using TimeCurrent().
-ulong NowMs(void) { return GetTickCount64(); }
+ulong NowMs(void) { return ClockMs(); }   // Include/GoldGrid/Clock.mqh
 
 ulong    last_report_at = 0;
 ulong    last_config_at = 0;
@@ -136,9 +152,591 @@ int DirectionSlot(const ENUM_POSITION_TYPE type)
 //--- platform stops answering. After that the EA fails closed.
 int CONFIG_STALE_AFTER_SECONDS = 120;
 
+//--- RISK HALTS (every category).
+//---
+//--- An emergency stop from the platform, or the daily loss limit, closes
+//--- every position and pending order of this EA at market and opens nothing
+//--- more. Unlike the ordinary gates, which only refuse new entries, these
+//--- act on what is already open — that is the point of them.
+string   risk_halt_noted          = "";
+ulong    last_halt_close_attempt  = 0;
+
+//--- "" when trading may continue, otherwise why it may not.
+string RiskHaltReason()
+  {
+   if(!g_strategy.loaded)
+      return "";
+   if(g_strategy.emergency_stop)
+      return "Emergency stop from the platform — closing everything";
+   if(g_grid.DailyLossBreached(g_strategy))
+      return StringFormat("Daily loss limit reached (%.2f today, limit %.2f) — closed until the next trading day",
+                          g_grid.TodayProfit(), g_strategy.max_daily_loss);
+   return "";
+  }
+
+//+------------------------------------------------------------------+
+//| Returns true while a halt is in force, so the caller decides      |
+//| nothing else that pass. Pending orders go first — nothing may     |
+//| fill while positions are being closed — then the positions, paced |
+//| so a close the broker keeps refusing is not hammered every tick.  |
+//+------------------------------------------------------------------+
+bool EnforceRiskHalts()
+  {
+   string halt = RiskHaltReason();
+   if(halt == "")
+     {
+      if(risk_halt_noted != "")
+         Print("GoldGrid: risk halt cleared");
+      risk_halt_noted = "";
+      return false;
+     }
+
+   if(halt != risk_halt_noted)
+      PrintFormat("GoldGrid: RISK HALT — %s", halt);
+   risk_halt_noted = halt;
+
+   //--- The master switch means "send nothing", closes included. Entries are
+   //--- refused by the gate regardless.
+   if(!InpAllowTrading)
+      return true;
+
+   int cancelled = g_grid.DeleteAllPendingStops() + g_grid.DeleteStrayOrders();
+   if(cancelled > 0)
+      PrintFormat("GoldGrid: risk halt cancelled %d pending order(s)", cancelled);
+
+   if(g_grid.TotalPositions() == 0 || NowMs() - last_halt_close_attempt < 5000)
+      return true;
+   last_halt_close_attempt = NowMs();
+
+   //--- A single position closes through CLOSING, so the state machine
+   //--- confirms it with the broker like any other close the EA sends.
+   if(SinglePositionMode() && g_state.Is(STATE_CLOSING))
+      return true;
+   if(SinglePositionMode() && g_state.IsActive())
+     {
+      BeginClose(g_state.Ticket(), "risk halt");
+      return true;
+     }
+
+   int failed = g_grid.CloseAllPositions("risk halt");
+   if(failed > 0)
+      PrintFormat("GoldGrid: risk halt could not close %d position(s) — retrying", failed);
+   return true;
+  }
+
+//--- ONE ACTIVE POSITION + EXECUTION STATE (trailing and reversal categories).
+//---
+//--- These strategies may hold zero or one position — never a buy and a sell
+//--- together. What the EA is doing is held in g_state (Include/GoldGrid/
+//--- State.mqh), persisted across restarts and reconciled against the broker's
+//--- actual positions on every pass by StepState():
+//---
+//---   INITIALIZING --flat--> WAITING --fill--> BUY_ACTIVE / SELL_ACTIVE
+//---   *_ACTIVE --stop/TP/manual close--> WAITING (cooldown starts)
+//---   *_ACTIVE --EA sends a close--> CLOSING --broker confirms--> WAITING
+//---   anything --breach / unconfirmed close--> RECOVERY --consistent--> resumes
+//---
+//--- Entries are only ever placed from WAITING, and only after EntryAllowed()
+//--- has re-read the broker.
+//---
+//--- entry_lock_until: set the moment an order is sent or a fill is seen, so a
+//--- position that has not yet appeared in PositionsTotal() cannot be
+//--- mistaken for "flat" and doubled. In-memory on purpose: a restart goes
+//--- through INITIALIZING, which re-reads the broker anyway.
+CExecutionState g_state;
+ulong    entry_lock_until      = 0;
+ulong    recovery_clean_since  = 0;
+ulong    last_recovery_attempt = 0;
+int      CLOSE_CONFIRM_TIMEOUT_SECONDS = 15;
+int      RECOVERY_SETTLE_SECONDS       = 10;
+
+//--- THE CONFIRMED-CLOSE REVERSAL (reversal category).
+//---
+//--- The "trailing opposite entry" of the spec is virtual: its level is the
+//--- open position's own broker-side stop, which ApplyTrailingStops ratchets in
+//--- the favourable direction only. When price turns by the trailing distance
+//--- the BROKER closes the position at that stop — so it is protected even
+//--- with this terminal offline — and only then does the EA open the opposite
+//--- side, at market:
+//---
+//---   *_ACTIVE --closed by its stop at the level--> REVERSAL_PENDING
+//---   REVERSAL_PENDING --close confirmed, zero positions--> OPENING_REVERSE
+//---   OPENING_REVERSE --fill--> the opposite *_ACTIVE
+//---
+//--- No order for the new side exists until the old side is confirmed gone,
+//--- so the two can never be open together. Any close that is not the stop
+//--- (take profit, manual, stop-out, basket exit) is not a reversal: the
+//--- strategy goes back to WAITING and the cooldown applies.
+ENUM_POSITION_TYPE reverse_side      = POSITION_TYPE_BUY;
+ulong    reverse_sent_at     = 0;     // the open request went out; waiting for its fill
+ulong    reverse_retry_at    = 0;     // earliest time for the next attempt after a rejection
+int      reverse_attempts    = 0;
+int      REVERSE_MAX_ATTEMPTS          = 3;
+int      REVERSE_RETRY_SECONDS         = 2;
+int      REVERSE_FILL_TIMEOUT_SECONDS  = 10;
+//--- A reversal that cannot be sent within this long (spread too wide, market
+//--- closed, strategy stopped) is abandoned rather than sent late at a price
+//--- that no longer has anything to do with the level that triggered it.
+int      REVERSE_ABANDON_SECONDS       = 30;
+ulong    vanished_at         = 0;     // our position left the open list before its deal was in history
+ulong    level_ticket        = 0;     // the position the recorded reversal level belongs to
+
+bool SinglePositionMode()
+  {
+   return g_strategy.loaded && g_strategy.category != CATEGORY_GRID;
+  }
+
+void LockEntries(const int seconds)
+  {
+   ulong until = NowMs() + (ulong)seconds * 1000;
+   if(until > entry_lock_until)
+      entry_lock_until = until;
+  }
+
+//--- The gate every single-position entry passes, immediately before the order
+//--- is sent. `why` is left empty when the refusal is the normal state of
+//--- things (a position is simply open) so the log is not flooded with it.
+bool EntryAllowed(string &why)
+  {
+   why = "";
+
+   if(!g_state.Is(STATE_WAITING))
+     {
+      if(g_state.Is(STATE_RECOVERY))
+         why = "in RECOVERY — " + g_state.Reason();
+      return false;
+     }
+
+   //--- The state says flat; the broker has the final word.
+   if(g_grid.TotalPositions() > 0)
+      return false;
+
+   if(NowMs() < entry_lock_until)
+     {
+      why = "a previous order is still settling";
+      return false;
+     }
+
+   if(g_state.SecondsSinceClose() < InpReentryCooldownSeconds)
+     {
+      why = StringFormat("re-entry cooldown after a close (%d s)", InpReentryCooldownSeconds);
+      return false;
+     }
+
+   return true;
+  }
+
+//--- Sends a close and moves to CLOSING. Only the broker's confirmation, seen
+//--- by StepState(), takes the state out of CLOSING again.
+bool BeginClose(const ulong ticket, const string why)
+  {
+   LockEntries(OPEN_COOLDOWN_SECONDS);
+   if(!g_grid.ClosePosition(ticket, why))
+     {
+      g_state.Set(STATE_RECOVERY, StringFormat("close of #%I64u failed (%s)", ticket, why), ticket);
+      return false;
+     }
+   g_state.Set(STATE_CLOSING, why, ticket);
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| RECOVERY. Nothing is opened. Excess positions are closed (unless  |
+//| the master switch is off), nothing is left resting, and the state |
+//| is only left once the broker has shown a consistent picture —     |
+//| at most one position, and any close in question accounted for —   |
+//| for RECOVERY_SETTLE_SECONDS in a row.                             |
+//+------------------------------------------------------------------+
+void Recover(const int held, const ulong ticket, const ENUM_EXEC_STATE active)
+  {
+   static bool reported_without_trading = false;
+
+   //--- Nothing can be sent outside the trading session (or with the terminal's
+   //--- own trading switched off); requests then would only be rejected, every
+   //--- pass. The checks below still run, so the state is ready at the open.
+   bool can_send = InpAllowTrading && g_grid.TradingAllowed();
+
+   if(held > 1)
+     {
+      recovery_clean_since = 0;
+
+      if(InpAllowTrading && !can_send)
+         return;
+
+      //--- The master switch means "send nothing", and that includes closes.
+      if(!InpAllowTrading)
+        {
+         if(!reported_without_trading)
+            PrintFormat("GoldGrid: %d positions open, but AllowTrading is off so nothing is "
+                        "closed. Resolve it by hand.", held);
+         reported_without_trading = true;
+         return;
+        }
+
+      //--- Paced, so a close the broker keeps rejecting is not hammered on
+      //--- every tick.
+      if(NowMs() - last_recovery_attempt < 5000)
+         return;
+      last_recovery_attempt = NowMs();
+
+      PrintFormat("GoldGrid: RECOVERY — %d positions open. Cancelling pending orders and "
+                  "closing all but the newest.", held);
+      g_grid.DeleteAllPendingStops();
+      g_grid.CloseAllButNewest();
+      LockEntries(OPEN_COOLDOWN_SECONDS);
+      return;
+     }
+   reported_without_trading = false;
+
+   if(can_send)
+      g_grid.DeleteAllPendingStops();
+
+   //--- A close that is still in question must be accounted for: either the
+   //--- position is still open (the close failed — it keeps its own stop) or
+   //--- the broker's history shows it closed. Neither yet means wait.
+   ulong in_question = g_state.Ticket();
+   bool  understood  = in_question == 0 ||
+                       PositionSelectByTicket(in_question) ||
+                       g_grid.PositionConfirmedClosed(in_question, g_state.PositionId());
+   if(!understood)
+     {
+      recovery_clean_since = 0;
+      //--- Staying put is the rule — no new trade until the close is
+      //--- confirmed — but a strategy that silently stops trading for good is
+      //--- a problem the user has to hear about.
+      static ulong warned_for = 0;
+      if(warned_for != in_question && g_state.MsInState() > 5 * 60 * 1000)
+        {
+         PrintFormat("GoldGrid: STILL IN RECOVERY after 5 minutes — the close of #%I64u cannot be found in the "
+                     "broker's deal history, so nothing new will be opened. Check the account in MetaTrader; "
+                     "restarting the strategy re-reads the broker from scratch.", in_question);
+         warned_for = in_question;
+        }
+      return;
+     }
+
+   if(recovery_clean_since == 0)
+     {
+      recovery_clean_since = NowMs();
+      return;
+     }
+   if(NowMs() - recovery_clean_since < (ulong)RECOVERY_SETTLE_SECONDS * 1000)
+      return;
+
+   recovery_clean_since = 0;
+   //--- Leaving RECOVERY is treated like a close: the cooldown applies before
+   //--- anything new opens.
+   g_state.RecordClose();
+   if(held == 1)
+      g_state.Set(active, "recovered — one position open", ticket);
+   else
+      g_state.Set(STATE_WAITING, "recovered — flat");
+  }
+
+//+------------------------------------------------------------------+
+//| Whether a close is the reversal trigger. Only a reversal strategy |
+//| reverses, only on a close by the position's own stop (which the   |
+//| EA has been trailing as the reversal level), and only while it is |
+//| allowed to trade. `why` describes the close either way.           |
+//+------------------------------------------------------------------+
+bool IsReversalClose(const ENUM_POSITION_TYPE was, const ENUM_DEAL_REASON reason,
+                     const double price, string &why)
+  {
+   int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   string side   = was == POSITION_TYPE_BUY ? "BUY" : "SELL";
+   double level  = g_state.TrailLevel();
+
+   why = StringFormat("%s #%I64u closed by %s at %s", side, g_state.Ticket(),
+                      DealReasonText(reason), DoubleToString(price, digits));
+
+   if(g_strategy.category != CATEGORY_REVERSAL)
+      return false;
+   if(reason != DEAL_REASON_SL)
+     {
+      why += " — not its trailing stop, so no reversal";
+      return false;
+     }
+   if(level <= 0.0)
+     {
+      why += " — no reversal level was being tracked, so no reversal";
+      return false;
+     }
+   if(halted || !InpAllowTrading || !g_strategy.IsRunning())
+     {
+      why += " — trading is not allowed right now, so no reversal";
+      return false;
+     }
+   string halt = RiskHaltReason();
+   if(halt != "")
+     {
+      why += " — " + halt + ", so no reversal";
+      return false;
+     }
+
+   //--- A gap fills the stop beyond its level. Logged, because it is the
+   //--- difference between the loss the user configured and the one they got.
+   double slip = (was == POSITION_TYPE_BUY) ? level - price : price - level;
+   why = StringFormat("reversal level %s hit — %s (slippage %d points)",
+                      DoubleToString(level, digits), why, (int)MathRound(slip / _Point));
+   return true;
+  }
+
+//--- The virtual opposite entry: the level the open position's stop has
+//--- trailed to, which is the price the reversal will happen at. Recorded so
+//--- the close can be recognised as the reversal, and logged whenever it moves
+//--- (ApplyTrailingStops only ever moves it forwards). A new position starts
+//--- from its own stop — never from the level its predecessor left behind.
+void TrackReversalLevel(const ENUM_POSITION_TYPE side)
+  {
+   ulong  ticket = g_state.Ticket();
+   double level  = g_grid.PositionStop(side);
+
+   if(ticket != level_ticket)
+     {
+      level_ticket = ticket;
+      g_state.SetTrailLevel(0.0);
+     }
+
+   if(level > 0.0 && g_state.SetTrailLevel(level) && !IsTester())
+      PrintFormat("GoldGrid: reversal level — %s opens if price reaches %s (the %s's stop)",
+                  side == POSITION_TYPE_BUY ? "SELL" : "BUY",
+                  DoubleToString(level, _Digits), side == POSITION_TYPE_BUY ? "buy" : "sell");
+  }
+
+void AbandonReversal(const string why)
+  {
+   //--- Treated as a close: the cooldown runs before the bracket returns.
+   g_state.RecordClose();
+   g_state.Set(STATE_WAITING, "reversal abandoned — " + why);
+  }
+
+//+------------------------------------------------------------------+
+//| Step 5 of a reversal: the opposite side, at market, with its stop |
+//| attached in the same request. Runs only in OPENING_REVERSE, which |
+//| StepState enters only once the old position is confirmed closed   |
+//| and the account is flat — and re-checks the broker regardless.    |
+//+------------------------------------------------------------------+
+void ExecuteReversal()
+  {
+   //--- One request per reversal. Once the broker has accepted it, only its
+   //--- fill (or StepState's timeout) moves things on.
+   if(reverse_sent_at > 0 || NowMs() < reverse_retry_at)
+      return;
+
+   if(g_grid.TotalPositions() != 0)
+      return;
+
+   string side = reverse_side == POSITION_TYPE_BUY ? "BUY" : "SELL";
+
+   if(halted || !InpAllowTrading)
+     {
+      AbandonReversal(halted ? halt_reason : "AllowTrading is off");
+      return;
+     }
+
+   //--- The full risk gate, spread included: this is a market order, filled
+   //--- now, at whatever the spread is now. A gate that stays shut past
+   //--- REVERSE_ABANDON_SECONDS abandons the reversal (StepState).
+   double lot = GridLotForLevel(g_strategy, 1, _Symbol);
+   string reason;
+   if(!g_grid.MayOpen(g_strategy, ConfigurationIsFresh(), lot, reverse_side, reason))
+     {
+      NoteGate(reverse_side, "reversal waiting — " + reason);
+      return;
+     }
+   last_gate_note = "";
+
+   reverse_attempts++;
+   LockEntries(OPEN_COOLDOWN_SECONDS);
+   PrintFormat("GoldGrid: REVERSAL — opening %s %.2f lots (attempt %d of %d)",
+               side, lot, reverse_attempts, REVERSE_MAX_ATTEMPTS);
+
+   if(g_grid.OpenMarket(reverse_side, lot, StringFormat("GG:%I64d:REV", g_strategy.id),
+                        g_strategy.trailing_stop_points))
+     {
+      reverse_sent_at = NowMs();
+      return;
+     }
+
+   //--- Rejected (requote, price off, busy). Nothing opened, so trying again
+   //--- is safe — a few times, spaced out, then the reversal is dropped.
+   if(reverse_attempts >= REVERSE_MAX_ATTEMPTS)
+      AbandonReversal(StringFormat("the %s order was rejected %d times", side, reverse_attempts));
+   else
+      reverse_retry_at = NowMs() + (ulong)REVERSE_RETRY_SECONDS * 1000;
+  }
+
+//+------------------------------------------------------------------+
+//| THE STATE MACHINE. Reconciles g_state with the broker's actual    |
+//| positions. Runs on every pass and on every trade transaction.     |
+//+------------------------------------------------------------------+
+void StepState()
+  {
+   ENUM_POSITION_TYPE type = POSITION_TYPE_BUY;
+   int   held   = g_grid.TotalPositions();
+   ulong ticket = g_grid.OurPosition(type);
+   ENUM_EXEC_STATE active = (type == POSITION_TYPE_BUY) ? STATE_BUY_ACTIVE : STATE_SELL_ACTIVE;
+
+   //--- The grace for a close whose deal lags the open list belongs to one
+   //--- ACTIVE spell; it must not carry over into the next position's.
+   if(!g_state.IsActive())
+      vanished_at = 0;
+
+   //--- Nothing the EA does can explain two positions.
+   if(held > 1 && !g_state.Is(STATE_RECOVERY))
+      g_state.Set(STATE_RECOVERY, StringFormat("%d positions open — one-position rule breached", held));
+
+   switch(g_state.State())
+     {
+      case STATE_INITIALIZING:
+         if(held == 1)
+            g_state.Set(active, "position found at startup", ticket);
+         else
+            g_state.Set(STATE_WAITING, "flat at startup");
+         break;
+
+      case STATE_WAITING:
+         if(held == 1)
+            g_state.Set(active, "entry filled", ticket);
+         break;
+
+      case STATE_BUY_ACTIVE:
+      case STATE_SELL_ACTIVE:
+         if(held == 0)
+           {
+            //--- How it closed decides what happens next, so that has to be
+            //--- known, not guessed. The open list can drop a position a
+            //--- moment before the history holds its closing deal.
+            ENUM_DEAL_REASON   close_reason;
+            double             close_price;
+            ENUM_POSITION_TYPE closed_side;
+            if(!g_grid.ClosingDeal(g_state.Ticket(), g_state.PositionId(), close_reason, close_price, closed_side))
+              {
+               if(vanished_at == 0)
+                  vanished_at = NowMs();
+               else if(NowMs() - vanished_at > (ulong)CLOSE_CONFIRM_TIMEOUT_SECONDS * 1000)
+                 {
+                  vanished_at = 0;
+                  g_state.Set(STATE_RECOVERY,
+                              StringFormat("#%I64u left the open list but no closing deal appeared in %d s",
+                                           g_state.Ticket(), CLOSE_CONFIRM_TIMEOUT_SECONDS),
+                              g_state.Ticket());
+                 }
+               break;
+              }
+            vanished_at = 0;
+
+            ENUM_POSITION_TYPE was = g_state.Is(STATE_BUY_ACTIVE) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
+            g_state.RecordClosedSide(was);
+
+            //--- The position's stop IS the reversal level. A close by that
+            //--- stop is the reversal trigger; anything else is not.
+            string why;
+            if(IsReversalClose(was, close_reason, close_price, why))
+              {
+               reverse_side     = (was == POSITION_TYPE_BUY) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+               reverse_sent_at  = 0;
+               reverse_retry_at = 0;
+               reverse_attempts = 0;
+               LockEntries(OPEN_COOLDOWN_SECONDS);
+               g_state.Set(STATE_REVERSAL_PENDING, why, g_state.Ticket());
+               break;
+              }
+
+            //--- Closed by something other than its trailing stop: a take
+            //--- profit, a manual close, a stop-out. That is not a signal to
+            //--- enter again — the cooldown starts here.
+            g_state.RecordClose();
+            g_state.Set(STATE_WAITING, why);
+           }
+         else if(ticket != g_state.Ticket() || !g_state.Is(active))
+            g_state.Set(active, "the open position changed", ticket);
+         break;
+
+      case STATE_CLOSING:
+         if(g_grid.PositionConfirmedClosed(g_state.Ticket(), g_state.PositionId()))
+           {
+            g_state.RecordClose();
+            if(held == 0)
+               g_state.Set(STATE_WAITING, "close confirmed by the broker");
+            else
+               g_state.Set(active, "close confirmed; another position remains", ticket);
+           }
+         else if(g_state.MsInState() > (ulong)CLOSE_CONFIRM_TIMEOUT_SECONDS * 1000)
+            g_state.Set(STATE_RECOVERY,
+                        StringFormat("close of #%I64u not confirmed within %d s",
+                                     g_state.Ticket(), CLOSE_CONFIRM_TIMEOUT_SECONDS),
+                        g_state.Ticket());
+         break;
+
+      case STATE_RECOVERY:
+         Recover(held, ticket, active);
+         break;
+
+      //--- Steps 1-4 of a reversal: entries are already locked (nothing opens
+      //--- outside WAITING); the old position must be confirmed closed by the
+      //--- broker and the account verified flat before the new side may go.
+      case STATE_REVERSAL_PENDING:
+         if(held > 0)
+           {
+            g_state.Set(STATE_RECOVERY, "a position appeared while a reversal was pending", ticket);
+            break;
+           }
+         if(!g_grid.PositionConfirmedClosed(g_state.Ticket(), g_state.PositionId()))
+           {
+            if(g_state.MsInState() > (ulong)CLOSE_CONFIRM_TIMEOUT_SECONDS * 1000)
+               g_state.Set(STATE_RECOVERY,
+                           StringFormat("close of #%I64u not confirmed within %d s — no reversal",
+                                        g_state.Ticket(), CLOSE_CONFIRM_TIMEOUT_SECONDS),
+                           g_state.Ticket());
+            break;
+           }
+         g_state.Set(STATE_OPENING_REVERSE,
+                     StringFormat("#%I64u confirmed closed, zero positions — opening %s",
+                                  g_state.Ticket(), reverse_side == POSITION_TYPE_BUY ? "BUY" : "SELL"));
+         break;
+
+      //--- Steps 5-6: ExecuteReversal() sends the order; this watches for its
+      //--- fill and gives up cleanly if it never comes.
+      case STATE_OPENING_REVERSE:
+         if(held == 1)
+           {
+            if(type != reverse_side)
+               g_state.Set(STATE_RECOVERY, "the position that opened is not the reversal side", ticket);
+            else
+               g_state.Set(active, "reversal filled", ticket);
+            break;
+           }
+         if(reverse_sent_at > 0)
+           {
+            //--- The broker accepted the request but no position has appeared.
+            //--- Whether it exists is now uncertain, and the one thing that
+            //--- must not happen is sending it again.
+            if(NowMs() - reverse_sent_at > (ulong)REVERSE_FILL_TIMEOUT_SECONDS * 1000)
+               g_state.Set(STATE_RECOVERY,
+                           StringFormat("reversal order accepted but no position within %d s",
+                                        REVERSE_FILL_TIMEOUT_SECONDS));
+            break;
+           }
+         if(g_state.MsInState() > (ulong)REVERSE_ABANDON_SECONDS * 1000)
+            AbandonReversal(StringFormat("could not be sent within %d s", REVERSE_ABANDON_SECONDS));
+         break;
+
+      default:
+         g_state.Set(STATE_RECOVERY, "unexpected state " + g_state.Name());
+         break;
+     }
+
+   if(g_state.IsActive() && g_strategy.category == CATEGORY_REVERSAL)
+      TrackReversalLevel(g_state.Is(STATE_BUY_ACTIVE) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL);
+  }
+
 //+------------------------------------------------------------------+
 int OnInit()
   {
+   if(IsTester())
+      return InitTester();
+
    if(StringLen(InpApiToken) == 0)
      {
       Print("GoldGrid: no API token set. Create one at Settings > API tokens and paste it into the EA inputs.");
@@ -158,6 +756,13 @@ int OnInit()
    g_api.Configure(InpBaseUrl, InpApiToken);
    g_grid.Configure(InpMagicNumber, _Symbol, InpSlippagePoints);
    g_grid.LoadPeakEquity();
+
+   g_state.Configure(InpMagicNumber, _Symbol);
+   ENUM_EXEC_STATE previous = g_state.Load();
+   long since_close = g_state.SecondsSinceClose();
+   PrintFormat("GoldGrid: previous session ended in state %s%s. Reconciling with the broker before "
+               "anything is placed.", ExecStateName(previous),
+               since_close == LONG_MAX ? "" : StringFormat(", last close %I64d s ago", since_close));
 
    if(!InpAllowTrading)
       Print("GoldGrid: AllowTrading is OFF. The EA will report state but place no orders.");
@@ -203,6 +808,15 @@ void OnDeinit(const int reason)
 void OnTimer()
   {
    g_grid.TrackEquity();
+
+   //--- The tester's configuration comes from inputs and never goes stale;
+   //--- there is no platform to refresh from or report to.
+   if(IsTester())
+     {
+      g_strategy.fetched_at = ClockMs();
+      ManageBaskets();
+      return;
+     }
 
    if(NowMs() - last_config_at >= (ulong)InpConfigSeconds * 1000)
       RefreshConfiguration();
@@ -304,6 +918,50 @@ void ManageBaskets()
    //--- loss they configured the stop to prevent.
    g_grid.ApplyTrailingStops(g_strategy);
 
+   //--- Reconcile the execution state with the broker before anything else.
+   //--- While a close awaits confirmation, or the account is in RECOVERY,
+   //--- nothing further is decided this pass — the stops above still trail.
+   if(SinglePositionMode())
+      StepState();
+
+   //--- Outside the broker's trading session (weekend, gold's daily break)
+   //--- every request is rejected with "Market closed", so none is sent: no
+   //--- entries, no cancels, no closes. Resting orders and the positions'
+   //--- stops are held by the broker meanwhile. The state machine above has
+   //--- still reconciled, so the first pass after the open acts on the truth.
+   static bool closed_noted = false;
+   if(g_grid.TradingGate() == GATE_MARKET_CLOSED)
+     {
+      if(!closed_noted)
+         Print("GoldGrid: market closed for this symbol — sending nothing until it opens");
+      closed_noted = true;
+      return;
+     }
+   if(closed_noted)
+      Print("GoldGrid: market open again");
+   closed_noted = false;
+
+   //--- Emergency stop and daily loss act on what is open, in every state —
+   //--- RECOVERY included.
+   if(EnforceRiskHalts())
+      return;
+
+   if(SinglePositionMode() && (g_state.Is(STATE_CLOSING) || g_state.Is(STATE_RECOVERY)))
+      return;
+
+   //--- A trailing strategy enters at market and never places a pending
+   //--- order, so any resting order with this magic number is a stray — left
+   //--- by an older build, a manual order, a retried request — and a second
+   //--- way to open a position. It goes at once. (Found by the tester's
+   //--- invariant monitor: a stray rested beside the open position forever,
+   //--- because only the reversal path cleaned orders up.)
+   if(g_strategy.category == CATEGORY_TRAILING && InpAllowTrading)
+     {
+      int removed = g_grid.DeleteAllPendingStops() + g_grid.DeleteStrayOrders();
+      if(removed > 0)
+         PrintFormat("GoldGrid: removed %d stray pending order(s) — a trailing strategy places none", removed);
+     }
+
    if(g_strategy.category == CATEGORY_REVERSAL)
      {
       ManageReversal();
@@ -323,7 +981,26 @@ bool ExitBasketIfDue(const ENUM_POSITION_TYPE type, const SBasket &basket)
    if(!g_grid.ShouldCloseBasket(g_strategy, basket))
       return false;
 
-   int closed = g_grid.CloseBasket(type);
+   //--- A close is an order, and the master switch means none is sent. The
+   //--- position keeps its stop, which the broker holds.
+   if(!InpAllowTrading)
+     {
+      NoteGate(type, "basket exit reached, but AllowTrading is off — not closing");
+      return false;
+     }
+
+   //--- A single-position strategy's close is tracked through CLOSING until
+   //--- the broker confirms it, so nothing can open in the meantime.
+   int closed = 0;
+   if(SinglePositionMode())
+     {
+      ENUM_POSITION_TYPE held_type;
+      ulong ticket = g_grid.OurPosition(held_type);
+      if(ticket != 0 && held_type == type && BeginClose(ticket, "basket exit"))
+         closed = 1;
+     }
+   else
+      closed = g_grid.CloseBasket(type);
 
    //--- Record *why*, and the spread at the moment of the decision.
    //---
@@ -361,8 +1038,30 @@ void ManageDirection(const ENUM_POSITION_TYPE type)
    if(halted || !InpAllowTrading)
       return;
 
-   //--- A trailing strategy holds one position per direction; a grid holds as
-   //--- many as it has levels.
+   //--- A trailing strategy holds ONE position in total, not one per direction:
+   //--- a buy and a sell side by side were each stopped out in turn and
+   //--- re-opened, which is how losses compounded. Whichever side is open, the
+   //--- other waits until it has closed and the cooldown has passed.
+   //--- With both directions allowed, the next entry is the side opposite the
+   //--- one that just closed: a trailing stop is hit because price turned, so
+   //--- re-entering the same way means betting against the move that took the
+   //--- last position out. The first entry ever is a buy.
+   if(SinglePositionMode() && g_strategy.direction == GRID_BOTH && g_state.LastSide() == (int)type)
+      return;
+
+   if(SinglePositionMode())
+     {
+      string why;
+      if(!EntryAllowed(why))
+        {
+         if(why != "")
+            NoteGate(type, why);
+         return;
+        }
+     }
+
+   //--- A trailing strategy holds one position; a grid holds as many per
+   //--- direction as it has levels.
    int next_level = basket.count + 1;
    if(next_level > g_strategy.LevelsPerDirection())
       return;
@@ -410,6 +1109,10 @@ void ManageDirection(const ENUM_POSITION_TYPE type)
       //--- no other exit, so it is never left without one while it waits to
       //--- reach activation.
       int initial_stop = (g_strategy.category != CATEGORY_GRID) ? g_strategy.trailing_stop_points : 0;
+      //--- Locked before the request, not after: whatever it returns, the
+      //--- next pass must not read the account as flat while it settles.
+      if(SinglePositionMode())
+         LockEntries(OPEN_COOLDOWN_SECONDS);
       if(g_grid.OpenMarket(type, next_lot, StringFormat("GG:%I64d:L1", g_strategy.id), initial_stop))
         {
          last_open_at[DirectionSlot(type)] = NowMs();
@@ -466,54 +1169,54 @@ void ManageReversal()
    int    held      = buys.count + sells.count;
    string reason;
 
-   //--- Both sides open: the reversal order filled a moment before the old
-   //--- position's stop closed it, or the account was left that way. Its stop
-   //--- takes the old one out; nothing new is added meanwhile.
-   if(held > 1)
+   //--- A reversal in progress: nothing else happens until it completes.
+   //---
+   //--- Otherwise, with a position open (StepState has already sent any
+   //--- excess to RECOVERY), NO order for the opposite side rests. The old
+   //--- design parked one at the position's stop; the broker executed the two
+   //--- as unrelated requests, so the new side could fill before the old one
+   //--- closed, leaving a buy and a sell open together. The opposite entry is
+   //--- now virtual — see THE CONFIRMED-CLOSE REVERSAL.
+   if(g_state.Is(STATE_REVERSAL_PENDING))
+      return;
+   if(g_state.Is(STATE_OPENING_REVERSE))
      {
-      g_grid.DeleteAllPendingStops();
+      ExecuteReversal();
       return;
      }
 
-   if(held == 1)
+   if(held > 0)
      {
-      ENUM_POSITION_TYPE side     = buys.count > 0 ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
-      ENUM_POSITION_TYPE opposite = side == POSITION_TYPE_BUY ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
-
-      //--- Left over from the bracket that opened this position.
-      g_grid.DeletePendingStops(side);
-
-      //--- The reversal order rests where the position's stop is. Until the
-      //--- stop is placed there is nowhere to put it.
-      double stop = g_grid.PositionStop(side);
-      if(stop <= 0.0)
-         return;
-
-      double volume = side == POSITION_TYPE_BUY ? buys.volume : sells.volume;
-      if(!may_trade ||
-         !g_grid.MayOpen(g_strategy, ConfigurationIsFresh(), lot, opposite, reason, 1, volume, true))
-        {
-         //--- Fail closed: no reversal order, and the position keeps the stop
-         //--- that protects it on its own.
-         NoteGate(opposite, may_trade ? reason : (halted ? halt_reason : "AllowTrading is off"));
-         g_grid.DeletePendingStops(opposite);
-         return;
-        }
-      last_gate_note = "";
-
-      g_grid.PlacePendingStop(opposite, lot, stop, g_strategy.trailing_stop_points,
-                              StringFormat("GG:%I64d:REV", g_strategy.id));
+      int cancelled = g_grid.DeleteAllPendingStops();
+      if(cancelled > 0)
+         PrintFormat("GoldGrid: cancelled %d pending order(s) — a position is open, "
+                     "nothing else may rest", cancelled);
       return;
      }
 
    //--- Flat: bracket the market. An order already resting on a side stays
-   //--- where it is — it may be the reversal order in the instant before it
-   //--- fills — and only a missing side is added.
+   //--- where it is and only a missing side is added.
    if(!may_trade ||
       !g_grid.MayOpen(g_strategy, ConfigurationIsFresh(), lot, POSITION_TYPE_BUY, reason, 0, 0.0, true))
      {
       NoteGate(POSITION_TYPE_BUY, may_trade ? reason : (halted ? halt_reason : "AllowTrading is off"));
       g_grid.DeleteAllPendingStops();
+      return;
+     }
+
+   //--- Strays and duplicates go at once, cooldown or not: they are never a
+   //--- side that is about to fill for us, only a second chance to fill twice.
+   g_grid.DeleteStrayOrders();
+
+   //--- Reconciled against the broker immediately before any order goes out.
+   //--- While a fill settles, or during the cooldown after a close, nothing is
+   //--- added — and nothing else is removed, since a resting side may be the
+   //--- one that is filling right now.
+   string why;
+   if(!EntryAllowed(why))
+     {
+      if(why != "")
+         NoteGate(POSITION_TYPE_BUY, why);
       return;
      }
    last_gate_note = "";
@@ -523,9 +1226,82 @@ void ManageReversal()
    if(bid <= 0.0 || ask <= 0.0)
       return;
 
-   double distance = g_strategy.trailing_stop_points * _Point;
-   string comment  = StringFormat("GG:%I64d:L1", g_strategy.id);
+   PlaceBracket(lot, bid, ask);
+  }
 
+//+------------------------------------------------------------------+
+//| THE INITIAL BRACKET. While flat, exactly one Buy Stop rests the   |
+//| entry distance above the ask and one Sell Stop the same distance  |
+//| below the bid. The first to fill becomes the only position and    |
+//| OnTradeTransaction cancels the other.                             |
+//|                                                                   |
+//| The comment records the strategy and the distance the bracket was |
+//| placed for ("GG:<id>:L1:D<points>"). A resting order whose comment |
+//| names a different strategy or distance, or whose volume is not    |
+//| the current lot size, is stale — the setting was                  |
+//| changed, or it is a previous session's — and both sides are       |
+//| withdrawn and re-placed around the current price. An order whose  |
+//| comment carries no GG marker at all (some brokers rewrite them) is |
+//| left alone: re-placing on a comment we cannot read would re-place |
+//| it on every pass.                                                 |
+//+------------------------------------------------------------------+
+bool BracketOrderIsStale(const ENUM_POSITION_TYPE side, const string expected, const double lot)
+  {
+   //--- A volume cannot be modified on a resting order, and the lot size may
+   //--- have been changed on the platform since this one was placed.
+   double volume = g_grid.PendingStopVolume(side);
+   if(volume > 0.0 && MathAbs(volume - lot) > 0.000001)
+      return true;
+
+   string comment = g_grid.PendingStopComment(side);
+   if(comment == "" || comment == expected || StringFind(comment, "GG:") != 0)
+      return false;
+
+   //--- The pre-Phase-4 bracket ("GG:<id>:L1") was always placed at the
+   //--- trailing distance. It is still correct while the two coincide.
+   if(comment == StringFormat("GG:%I64d:L1", g_strategy.id) &&
+      g_strategy.entry_distance_points == g_strategy.trailing_stop_points)
+      return false;
+
+   return true;
+  }
+
+void PlaceBracket(const double lot, const double bid, const double ask)
+  {
+   int    configured = g_strategy.entry_distance_points;
+   string comment    = StringFormat("GG:%I64d:L1:D%d", g_strategy.id, configured);
+
+   //--- 1. Nothing but one Buy Stop and one Sell Stop may rest.
+   g_grid.DeleteStrayOrders();
+
+   //--- 2. A bracket placed for another strategy or distance is withdrawn
+   //---    whole, so the two sides are always centred on the same price.
+   if(BracketOrderIsStale(POSITION_TYPE_BUY, comment, lot) || BracketOrderIsStale(POSITION_TYPE_SELL, comment, lot))
+     {
+      int removed = g_grid.DeleteAllPendingStops();
+      PrintFormat("GoldGrid: withdrew %d stale bracket order(s) — re-placing at %d points, %.2f lots",
+                  removed, configured, lot);
+      return;
+     }
+
+   //--- 3. The broker refuses a stop order closer to the market than its stop
+   //---    level. The configured distance is widened to the nearest accepted
+   //---    one, and the user told, rather than rejected on every pass.
+   int stops_level = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   int points      = configured;
+   if(points <= stops_level)
+     {
+      points = stops_level + 1;
+      static int warned_for = -1;
+      if(warned_for != configured)
+         PrintFormat("GoldGrid: entry distance of %d points is inside the broker's minimum of %d — "
+                     "bracketing at %d points instead.", configured, stops_level, points);
+      warned_for = configured;
+     }
+   double distance = points * _Point;
+
+   //--- 4. Only a missing side is added. A resting side is never moved while
+   //---    flat: it may be the one filling at this very moment.
    if(g_grid.FindPendingStop(POSITION_TYPE_BUY) == 0)
       g_grid.PlacePendingStop(POSITION_TYPE_BUY, lot, ask + distance, g_strategy.trailing_stop_points, comment);
    if(g_grid.FindPendingStop(POSITION_TYPE_SELL) == 0)
@@ -568,7 +1344,31 @@ void SendReport()
    last_report_at = NowMs();
 
    string body = BuildReportJson();
-   ENUM_API_RESULT result = g_api.PostReport(body);
+   string response;
+   ENUM_API_RESULT result = g_api.PostReport(body, response);
+
+   //--- The reply names the strategy's current configuration version. When it
+   //--- is not the one held, the configuration changed on the platform — a
+   //--- stop, an emergency stop, an edit — and is fetched now rather than at
+   //--- the next scheduled refresh.
+   if(result == API_OK)
+     {
+      CJsonParser parser;
+      CJsonNode *reply = parser.Parse(response);
+      if(CheckPointer(reply) == POINTER_DYNAMIC)
+        {
+         CJsonNode *version = reply.Get("config_version");
+         string current = (CheckPointer(version) != POINTER_INVALID && !version.IsNull())
+                          ? version.AsString("") : "";
+         delete reply;
+
+         if(current != "" && g_strategy.loaded && current != g_strategy.config_version)
+           {
+            Print("GoldGrid: configuration changed on the platform — refreshing now");
+            RefreshConfiguration();
+           }
+        }
+     }
 
    if(result == API_UNAUTHORIZED)
      {
@@ -621,6 +1421,26 @@ string BuildReportJson()
    json += "\"bid\":\"" + DoubleToString(bid, digits) + "\",";
    json += "\"ask\":\"" + DoubleToString(ask, digits) + "\",";
    json += "\"spread_points\":" + IntegerToString(spread) + "},";
+
+   //--- What the EA is doing, for the dashboard. Trailing and reversal report
+   //--- their state machine; a grid reports GRID. The reversal level is the
+   //--- open position's stop, "0" when there is none.
+   string state_name   = "GRID";
+   string state_reason = "";
+   double level        = 0.0;
+   if(SinglePositionMode())
+     {
+      state_name   = g_state.Name();
+      state_reason = g_state.Reason();
+      if(g_strategy.category == CATEGORY_REVERSAL && g_state.IsActive())
+         level = g_state.TrailLevel();
+     }
+   json += "\"execution\":{";
+   json += "\"state\":\"" + JsonEscape(state_name) + "\",";
+   json += "\"reason\":\"" + JsonEscape(state_reason) + "\",";
+   json += "\"reversal_level\":\"" + DoubleToString(level, digits) + "\",";
+   json += "\"daily_profit\":\"" + DoubleToString(g_grid.TodayProfit(), 2) + "\",";
+   json += "\"risk_halt\":\"" + JsonEscape(RiskHaltReason()) + "\"},";
 
    //--- All money values are sent as strings so the platform can parse them as
    //--- decimals. Sending them as JSON numbers would invite float rounding.
@@ -818,5 +1638,202 @@ void OnTick()
    //--- is not missed during a fast move between timer events.
    if(g_strategy.loaded)
       ManageBaskets();
+
+   if(IsTester())
+      TesterTick();
+  }
+
+//+------------------------------------------------------------------+
+//| STRATEGY TESTER HARNESS (Include/GoldGrid/Tester.mqh).            |
+//+------------------------------------------------------------------+
+int InitTester()
+  {
+   g_grid.Configure(InpMagicNumber, _Symbol, InpSlippagePoints);
+   g_grid.LoadPeakEquity();
+   g_state.Configure(InpMagicNumber, _Symbol);
+   g_state.Load();
+
+   BuildTesterStrategy(g_strategy, InpTestCategory, InpTestLot, InpTestTrailingPoints, InpTestStepPoints,
+                       InpTestEntryPoints, InpTestMaxSpreadPoints, InpTestMaxDailyLoss,
+                       InpTestGridSpacingPoints, InpTestGridLevels);
+   g_monitor.Configure(InpMagicNumber, _Symbol);
+   g_chaos.Configure(InpMagicNumber, _Symbol, InpChaosEveryMinutes, InpChaosSeed);
+
+   if(!InpAllowTrading)
+      Print("GoldGrid: AllowTrading is OFF — the tester run will place no orders.");
+   PrintFormat("GoldGrid: TESTER — category %s, lot %.2f, trailing %d, step %d, entry %d, cooldown %d s, "
+               "chaos every %d min (seed %d)",
+               InpTestCategory == TEST_GRID ? "grid" : InpTestCategory == TEST_TRAILING ? "trailing" : "reversal",
+               InpTestLot, InpTestTrailingPoints, g_strategy.trailing_step_points,
+               g_strategy.entry_distance_points, InpReentryCooldownSeconds, InpChaosEveryMinutes, InpChaosSeed);
+
+   EventSetTimer(1);
+   return INIT_SUCCEEDED;
+  }
+
+//--- Everything the EA holds in memory is lost on a real restart; only what
+//--- State.mqh persisted survives. This throws away exactly that and loads
+//--- the persisted state, as OnInit would.
+void SimulateRestart()
+  {
+   entry_lock_until      = 0;
+   recovery_clean_since  = 0;
+   last_recovery_attempt = 0;
+   reverse_sent_at       = 0;
+   reverse_retry_at      = 0;
+   reverse_attempts      = 0;
+   vanished_at           = 0;
+   level_ticket          = 0;
+   risk_halt_noted       = "";
+   last_gate_note        = "";
+   ENUM_EXEC_STATE previous = g_state.Load();
+   PrintFormat("GoldGrid: CHAOS restart — previous state %s, now %s", ExecStateName(previous), g_state.Name());
+  }
+
+void TesterTick()
+  {
+   static int   reversal_entries_at_close = -1;
+
+   if(SinglePositionMode())
+     {
+      ENUM_CHAOS_EVENT event = g_chaos.Due(g_monitor, g_strategy.trailing_stop_points);
+      if(event == CHAOS_RESTART)
+         SimulateRestart();
+      else if(event == CHAOS_TICK_STORM)
+         for(int i = 0; i < 25; i++)
+            ManageBaskets();
+      else if(event == CHAOS_MANUAL_CLOSE)
+         reversal_entries_at_close = g_state.Entries(STATE_REVERSAL_PENDING);
+
+      //--- A manual close is not the trailing stop: it must never reverse.
+      if(reversal_entries_at_close >= 0)
+        {
+         if(g_state.Entries(STATE_REVERSAL_PENDING) > reversal_entries_at_close)
+            g_monitor.Fail("a manual close was treated as a reversal");
+         if(NowMs() - g_chaos.manual_close_at > 30000)
+            reversal_entries_at_close = -1;
+        }
+
+      g_monitor.Check();
+     }
+  }
+
+//--- The run's verdict, printed where bin/mt5_backtest looks for it. The
+//--- return value is the optimisation criterion: fewer violations is better,
+//--- so it is negated.
+double OnTester()
+  {
+   int trades = 0;
+   if(HistorySelect(0, TimeCurrent() + 1))
+      for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+        {
+         ulong deal = HistoryDealGetTicket(i);
+         if(deal != 0 && HistoryDealGetInteger(deal, DEAL_ENTRY) == DEAL_ENTRY_IN)
+            trades++;
+        }
+
+   double closed_trades = TesterStatistics(STAT_TRADES);
+   double win_rate      = closed_trades > 0 ? TesterStatistics(STAT_PROFIT_TRADES) / closed_trades * 100.0 : 0.0;
+   double change_pct    = g_monitor.first_bid > 0 ? (g_monitor.last_bid - g_monitor.first_bid) / g_monitor.first_bid * 100.0 : 0.0;
+
+   PrintFormat("GoldGrid: TEST SUMMARY | violations=%d | max_positions=%d | trades=%d | reversals=%d | "
+               "reversals_abandoned=%d | recoveries=%d | closing=%d | breaches_seen=%d | breaches_repaired=%d | "
+               "chaos=%d (manual_close=%d extra_position=%d duplicate_order=%d restart=%d tick_storm=%d) | "
+               "net_profit=%.2f | profit_factor=%.2f | win_rate=%.1f | max_drawdown_pct=%.2f | "
+               "market_start=%.2f | market_end=%.2f | market_change_pct=%.2f | market_range=%.2f | checks=%d",
+               g_monitor.violations, g_monitor.max_positions, trades, g_state.Reversals(), g_state.Abandoned(),
+               g_state.Entries(STATE_RECOVERY), g_state.Entries(STATE_CLOSING),
+               g_monitor.breaches_seen, g_monitor.breaches_repaired,
+               g_chaos.Total(), g_chaos.counts[CHAOS_MANUAL_CLOSE], g_chaos.counts[CHAOS_EXTRA_POSITION],
+               g_chaos.counts[CHAOS_DUPLICATE_ORDER], g_chaos.counts[CHAOS_RESTART], g_chaos.counts[CHAOS_TICK_STORM],
+               TesterStatistics(STAT_PROFIT), TesterStatistics(STAT_PROFIT_FACTOR), win_rate,
+               TesterStatistics(STAT_EQUITYDD_PERCENT),
+               g_monitor.first_bid, g_monitor.last_bid, change_pct, g_monitor.high_bid - g_monitor.low_bid,
+               g_monitor.checks);
+   return -(double)g_monitor.violations;
+  }
+
+//+------------------------------------------------------------------+
+string DealReasonText(const ENUM_DEAL_REASON reason)
+  {
+   switch(reason)
+     {
+      case DEAL_REASON_SL:     return "stop loss";
+      case DEAL_REASON_TP:     return "take profit";
+      case DEAL_REASON_SO:     return "stop out (margin)";
+      case DEAL_REASON_EXPERT: return "EA";
+      case DEAL_REASON_CLIENT: return "manual (desktop)";
+      case DEAL_REASON_MOBILE: return "manual (mobile)";
+      case DEAL_REASON_WEB:    return "manual (web)";
+     }
+   return "other";
+  }
+
+//+------------------------------------------------------------------+
+//| Broker-confirmed executions. Fills and closes are acted on the    |
+//| moment the broker reports them, instead of up to a second later   |
+//| on the next timer pass — the gap in which a spike could fill the  |
+//| other side of the bracket too.                                    |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+  {
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD || trans.symbol != _Symbol)
+      return;
+   if(!HistoryDealSelect(trans.deal))
+      return;
+   if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != InpMagicNumber)
+      return;
+
+   ENUM_DEAL_ENTRY  entry  = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+   ENUM_DEAL_REASON reason = (ENUM_DEAL_REASON)HistoryDealGetInteger(trans.deal, DEAL_REASON);
+   ENUM_DEAL_TYPE   type   = (ENUM_DEAL_TYPE)HistoryDealGetInteger(trans.deal, DEAL_TYPE);
+   int              digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   string           side   = type == DEAL_TYPE_BUY ? "BUY" : "SELL";
+
+   if(entry == DEAL_ENTRY_IN)
+     {
+      PrintFormat("GoldGrid: FILLED %s %.2f lots at %s (position #%I64d)",
+                  side, HistoryDealGetDouble(trans.deal, DEAL_VOLUME),
+                  DoubleToString(HistoryDealGetDouble(trans.deal, DEAL_PRICE), digits),
+                  HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID));
+
+      if(!SinglePositionMode())
+         return;
+
+      //--- One-cancels-the-other: the moment one side of the bracket fills,
+      //--- the other is withdrawn.
+      LockEntries(OPEN_COOLDOWN_SECONDS);
+      int cancelled = g_grid.DeleteAllPendingStops();
+      if(cancelled > 0)
+         PrintFormat("GoldGrid: cancelled %d opposite pending order(s) after the fill", cancelled);
+
+      StepState();
+      return;
+     }
+
+   if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY)
+     {
+      //--- Logged before StepState(), which re-selects the deal history.
+      //--- The deal type is the closing side, so a SELL deal closed a buy.
+      PrintFormat("GoldGrid: CLOSED %s position #%I64d at %s by %s, P/L %.2f",
+                  type == DEAL_TYPE_SELL ? "BUY" : "SELL",
+                  HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID),
+                  DoubleToString(HistoryDealGetDouble(trans.deal, DEAL_PRICE), digits),
+                  DealReasonText(reason), HistoryDealGetDouble(trans.deal, DEAL_PROFIT));
+
+      if(!SinglePositionMode())
+         return;
+
+      //--- Recorded here as well as in StepState, so every close counts —
+      //--- including those confirmed through CLOSING or RECOVERY.
+      g_state.RecordClosedSide(type == DEAL_TYPE_SELL ? POSITION_TYPE_BUY : POSITION_TYPE_SELL);
+      g_state.RecordClose();
+      StepState();
+
+      if(g_state.Is(STATE_WAITING) && InpReentryCooldownSeconds > 0)
+         PrintFormat("GoldGrid: no new entry for %d s after this close", InpReentryCooldownSeconds);
+     }
   }
 //+------------------------------------------------------------------+

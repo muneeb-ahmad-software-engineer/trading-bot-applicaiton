@@ -13,6 +13,7 @@
 #define GOLDGRID_STRATEGY_MQH
 
 #include "Json.mqh"
+#include "Clock.mqh"
 
 enum ENUM_GRID_DIRECTION { GRID_BOTH, GRID_BUY_ONLY, GRID_SELL_ONLY };
 enum ENUM_LOT_MODE       { LOT_FIXED, LOT_MULTIPLIER };
@@ -52,6 +53,11 @@ struct SGridStrategy
    int                trailing_activation_points;
    int                trailing_step_points;
 
+   //--- Reversal only: how far from the market the flat Buy Stop / Sell Stop
+   //--- bracket rests. The platform sends the effective value (the trailing
+   //--- distance when the user left it blank).
+   int                entry_distance_points;
+
    bool               has_basket_take_profit;
    double             basket_take_profit;
    bool               has_basket_stop_loss;
@@ -66,7 +72,18 @@ struct SGridStrategy
    bool               has_max_spread;
    int                max_spread_points;
 
-   //--- Milliseconds since terminal start (GetTickCount64), NOT a wall clock.
+   //--- Realised + floating loss for the broker's trading day, in account
+   //--- currency, at which everything is closed until the next day.
+   bool               has_max_daily_loss;
+   double             max_daily_loss;
+   //--- Set by the platform's emergency stop: close everything, open nothing.
+   bool               emergency_stop;
+
+   //--- Identifies this exact configuration. A report response naming a
+   //--- different one makes the EA re-fetch at once.
+   string             config_version;
+
+   //--- ClockMs() (Clock.mqh), NOT a wall clock.
    //--- Staleness has to keep elapsing while the market is closed and no
    //--- quotes are arriving, which a server-time clock does not do.
    ulong              fetched_at;
@@ -110,6 +127,7 @@ bool ParseStrategy(CJsonNode *root, SGridStrategy &out, string &error)
    out.name   = s.Get("name")   != NULL ? s.Get("name").AsString("")   : "";
    out.symbol = s.Get("symbol") != NULL ? s.Get("symbol").AsString("") : "";
    out.status = s.Get("status") != NULL ? s.Get("status").AsString("") : "";
+   out.config_version = s.Get("config_version") != NULL ? s.Get("config_version").AsString("") : "";
 
    string category = s.Get("category") != NULL ? s.Get("category").AsString("grid") : "grid";
    if(category == "trailing")      out.category = CATEGORY_TRAILING;
@@ -173,6 +191,18 @@ bool ParseStrategy(CJsonNode *root, SGridStrategy &out, string &error)
          out.trailing_step_points = step.AsInt(0);
      }
 
+   //--- A platform that predates the field sends no "entry" at all; that is
+   //--- the old behaviour, a bracket at the trailing distance, and is filled in
+   //--- below once the trailing distance is known to be valid.
+   out.entry_distance_points = 0;
+   CJsonNode *entry = s.Get("entry");
+   if(CheckPointer(entry) != POINTER_INVALID)
+     {
+      CJsonNode *entry_distance = entry.Get("distance_points");
+      if(CheckPointer(entry_distance) != POINTER_INVALID && !entry_distance.IsNull())
+         out.entry_distance_points = entry_distance.AsInt(0);
+     }
+
    CJsonNode *basket = s.Get("basket");
    out.has_basket_take_profit = false;
    out.has_basket_stop_loss   = false;
@@ -211,6 +241,18 @@ bool ParseStrategy(CJsonNode *root, SGridStrategy &out, string &error)
    out.has_max_spread = (CheckPointer(spread) != POINTER_INVALID && !spread.IsNull());
    out.max_spread_points = out.has_max_spread ? spread.AsInt(0) : 0;
 
+   CJsonNode *daily = risk.Get("max_daily_loss");
+   out.has_max_daily_loss = (CheckPointer(daily) != POINTER_INVALID && !daily.IsNull());
+   out.max_daily_loss = out.has_max_daily_loss ? daily.AsDouble(0) : 0.0;
+   if(out.has_max_daily_loss && out.max_daily_loss <= 0.0)
+     { error = "Maximum daily loss must be greater than zero."; return false; }
+
+   //--- Absent (an older platform) means no emergency, not an unusable
+   //--- configuration.
+   CJsonNode *emergency = risk.Get("emergency_stop");
+   out.emergency_stop = (CheckPointer(emergency) != POINTER_INVALID && !emergency.IsNull())
+                        ? emergency.AsBool(false) : false;
+
    //--- Refuse a configuration that cannot be traded safely rather than
    //--- substituting defaults for missing values.
    if(out.initial_lot <= 0.0)       { error = "Entry lot size must be greater than zero."; return false; }
@@ -238,6 +280,9 @@ bool ParseStrategy(CJsonNode *root, SGridStrategy &out, string &error)
         {
          out.has_trailing_activation    = false;
          out.trailing_activation_points = 0;
+
+         if(out.entry_distance_points <= 0)
+            out.entry_distance_points = out.trailing_stop_points;
         }
      }
 
@@ -254,7 +299,7 @@ bool ParseStrategy(CJsonNode *root, SGridStrategy &out, string &error)
          out.trailing_step_points = out.trailing_stop_points;
      }
 
-   out.fetched_at = GetTickCount64();
+   out.fetched_at = ClockMs();
    out.loaded = true;
    return true;
   }

@@ -3,6 +3,13 @@
 
 <% actions = capture do %>
   <div class="flex flex-wrap gap-2">
+    <%# Offered whenever there is anything to close, running or not: a stopped
+        strategy with open positions is exactly when someone reaches for it. %>
+    <% if @strategy.running? || @positions.any? || @orders.any? %>
+      <%= button_to "Emergency stop", emergency_stop_strategy_path(@strategy), method: :post,
+            class: "btn btn-danger",
+            form: { data: { turbo_confirm: "EMERGENCY STOP #{@strategy.name}? The strategy stops AND your Expert Advisor closes every open position and cancels every pending order of this strategy at market. This cannot be undone." } } %>
+    <% end %>
     <% if @strategy.running? %>
       <%= button_to "Stop strategy", stop_strategy_path(@strategy), method: :post,
             class: "btn btn-danger",
@@ -39,6 +46,16 @@
     <% end %>
   </div>
 
+  <% if @strategy.emergency_stopped? %>
+    <div class="mb-4">
+      <%= render "components/alert", variant: :danger,
+                 title: "Emergency stop active since #{@strategy.emergency_stopped_at.to_fs(:long)}",
+                 body: "Your Expert Advisor is closing every position and pending order of this strategy and " \
+                       "will open nothing. #{@positions.any? ? "#{pluralize(@positions.size, 'position')} still reported open." : "Nothing is reported open."} " \
+                       "Start the strategy again to clear the emergency stop." %>
+    </div>
+  <% end %>
+
   <% if @strategy.running? %>
     <div class="mb-4">
       <%= render "components/alert", variant: :info,
@@ -56,6 +73,12 @@
     <%= render "strategies/terminal_panel", connection: @connection,
                instance: @instance, credential: @credential, diagnostics: @diagnostics %>
   </div>
+
+  <% if @connection&.live? && @connection.execution_state.present? %>
+    <div class="mb-4">
+      <%= render "strategies/execution_state", connection: @connection, strategy: @strategy %>
+    </div>
+  <% end %>
 
   <%# ------------------------------------------------------ Live state %>
   <% if @strategy.running? || @positions.any? || @orders.any? || @closed_count.positive? %>
@@ -147,7 +170,8 @@
                 [ :basket_stop_loss, "Basket stop loss", @strategy.basket_stop_loss || "—" ],
                 [ :max_drawdown_percent, "Drawdown protection", (@strategy.max_drawdown_percent ? "#{@strategy.max_drawdown_percent}%" : "—") ],
                 [ :min_margin_level_percent, "Minimum margin level", (@strategy.min_margin_level_percent ? "#{@strategy.min_margin_level_percent}%" : "—") ],
-                [ :max_spread_points, "Maximum spread (points)", @strategy.max_spread_points || "—" ]
+                [ :max_spread_points, "Maximum spread (points)", @strategy.max_spread_points || "—" ],
+                [ :max_daily_loss, "Maximum daily loss", @strategy.max_daily_loss || "—" ]
               ] %>
         </dl>
       </div>
@@ -162,8 +186,13 @@
           <%= render "strategies/setting_rows", rows: [
                 [ :trailing_stop_points, "Trailing distance", "#{@strategy.trailing_stop_points} points ($#{number_with_precision(@strategy.trailing_stop_price, precision: 2)})" ],
                 [ :trailing_activation_points, "Starts after", (@strategy.trailing_activation_points ? "#{@strategy.trailing_activation_points} points ($#{number_with_precision(@strategy.trailing_activation_price, precision: 2)}) in profit" : "Immediately") ],
-                [ :trailing_step_points, "Minimum step", "#{@strategy.trailing_step_points} points ($#{number_with_precision(@strategy.trailing_step_price, precision: 2)})" ]
-              ] %>
+                [ :trailing_step_points, "Minimum step", "#{@strategy.trailing_step_points} points ($#{number_with_precision(@strategy.trailing_step_price, precision: 2)})" ],
+                (if @strategy.category_reversal?
+                  [ :entry_distance_points, "Entry distance",
+                    "#{@strategy.effective_entry_distance_points} points ($#{number_with_precision(@strategy.entry_distance_price, precision: 2)})" +
+                    (@strategy.entry_distance_points ? "" : " — same as the trailing distance") ]
+                end)
+              ].compact %>
         </dl>
         <p class="caption mt-3">
           Applied to each position separately, and only ever moved in the favourable

@@ -1,0 +1,50 @@
+<%#
+  What the Expert Advisor reports it is doing: its execution state, why it is
+  in it, the price the next reversal happens at, and today's P/L against the
+  daily loss limit. Only shown for a terminal that is reporting a state —
+  a grid strategy, or an EA older than the state machine, reports none.
+
+  connection: the strategy's terminal connection
+  strategy: the strategy
+%>
+<% indicator, label = execution_state_indicator(connection.execution_state) %>
+<div class="card">
+  <div class="card-header"><h2 class="heading-4">Robot state</h2></div>
+  <div class="card-body space-y-3">
+    <div class="flex flex-wrap items-center gap-3">
+      <%= render "components/status", state: indicator, label: %>
+      <span class="caption"><%= connection.execution_state %></span>
+    </div>
+    <% if connection.execution_reason.present? %>
+      <p class="body-sm"><%= connection.execution_reason %></p>
+    <% end %>
+
+    <dl class="space-y-3">
+      <% if connection.reversal_level.present? %>
+        <div class="flex items-center justify-between gap-4">
+          <dt class="body-sm">
+            <%= connection.execution_state == "BUY_ACTIVE" ? "Sells" : "Buys" %> if price reaches
+          </dt>
+          <dd class="figure-sm"><%= number_with_precision(connection.reversal_level, precision: 2) %></dd>
+        </div>
+      <% end %>
+      <% unless connection.daily_profit.nil? %>
+        <div class="flex items-center justify-between gap-4">
+          <dt class="body-sm">Today's P/L</dt>
+          <dd class="figure-sm <%= profit_tone(connection.daily_profit) %>">
+            <%= signed_money(connection.daily_profit) %>
+            <% if strategy.max_daily_loss %>
+              <span class="caption">of −<%= number_with_precision(strategy.max_daily_loss, precision: 2) %> limit</span>
+            <% end %>
+          </dd>
+        </div>
+      <% end %>
+    </dl>
+
+    <% if connection.risk_halt.present? %>
+      <%= render "components/alert", variant: :danger,
+                 title: "Trading halted by a risk control",
+                 body: connection.risk_halt %>
+    <% end %>
+  </div>
+</div>

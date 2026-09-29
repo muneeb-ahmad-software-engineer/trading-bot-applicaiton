@@ -36,6 +36,25 @@ class StrategyLiveViewTest < ActionDispatch::IntegrationTest
     assert_match(/Risk utilisation/, response.body)
   end
 
+  test "the robot state reported by the EA is shown in plain words, with any risk halt" do
+    @strategy.start!
+    @strategy.update_columns(max_daily_loss: 50)
+    TerminalConnection.create!(
+      user: @user, strategy: @strategy, api_token: ApiToken.issue(user: @user, name: "MT5"),
+      symbol: "XAUUSD", last_report_at: Time.current,
+      execution_state: "BUY_ACTIVE", execution_reason: "entry filled",
+      reversal_level: 2316.40, daily_profit: -51.20, risk_halt: "Daily loss limit reached"
+    )
+
+    get strategy_path(@strategy)
+
+    assert_select "h2", text: "Robot state"
+    assert_match(/Holding a buy/, response.body)
+    assert_match(/Sells\s+if price reaches/, response.body)
+    assert_match(/2316.40/, response.body)
+    assert_match(/Trading halted by a risk control/, response.body)
+  end
+
   test "risk meters report utilisation against the configured limits" do
     @strategy.start!
     # 5 of 10 positions.

@@ -9,7 +9,7 @@ import { Controller } from "@hotwired/stimulus"
 // Without JavaScript every section stays visible and the form still submits
 // correctly — the irrelevant fields are simply ignored for that category.
 export default class extends Controller {
-  static targets = ["category", "grid", "trailingRequired"]
+  static targets = ["category", "grid", "reversal", "trailingRequired"]
 
   connect() {
     this.apply()
@@ -19,6 +19,7 @@ export default class extends Controller {
     const category = this.categoryTarget.value
 
     this.toggle(this.gridTargets, category === "grid")
+    this.toggle(this.reversalTargets, category === "reversal")
 
     // A trailing or reversal strategy has no other exit, so its distance is
     // mandatory.

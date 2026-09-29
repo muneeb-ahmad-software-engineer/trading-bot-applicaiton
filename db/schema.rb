@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_09_25_090000) do
+ActiveRecord::Schema[8.0].define(version: 2026_09_28_130000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -425,6 +425,9 @@ ActiveRecord::Schema[8.0].define(version: 2026_09_25_090000) do
     t.integer "trailing_stop_points"
     t.integer "trailing_activation_points"
     t.integer "trailing_step_points"
+    t.integer "entry_distance_points"
+    t.decimal "max_daily_loss", precision: 15, scale: 2
+    t.datetime "emergency_stopped_at"
     t.index ["user_id", "category"], name: "index_strategies_on_user_id_and_category"
     t.index ["user_id", "status"], name: "index_strategies_on_user_id_and_status"
     t.index ["user_id", "symbol"], name: "index_strategies_one_running_per_symbol", unique: true, where: "((status)::text = 'running'::text)"
@@ -447,6 +450,11 @@ ActiveRecord::Schema[8.0].define(version: 2026_09_25_090000) do
     t.datetime "last_report_at"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.string "execution_state"
+    t.string "execution_reason"
+    t.decimal "reversal_level", precision: 15, scale: 5
+    t.decimal "daily_profit", precision: 15, scale: 2
+    t.string "risk_halt"
     t.index ["api_token_id"], name: "index_terminal_connections_on_api_token_id", unique: true
     t.index ["strategy_id"], name: "index_terminal_connections_on_strategy_id"
     t.index ["user_id"], name: "index_terminal_connections_on_user_id"

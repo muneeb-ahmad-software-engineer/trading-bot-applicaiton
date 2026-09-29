@@ -42,6 +42,8 @@ class EaContractTest < ActionDispatch::IntegrationTest
       {"strategy_id":#{strategy_id},
        "terminal":{"ea_version":"1.00","broker":"Demo Broker Ltd","account_login":"12345678","symbol":"XAUUSD"},
        "tick":{"bid":"2318.40","ask":"2318.45","spread_points":5},
+       "execution":{"state":"BUY_ACTIVE","reason":"entry filled","reversal_level":"2316.40",
+                    "daily_profit":"-12.50","risk_halt":""},
        "account":{"currency":"USD","balance":"10000.00","equity":"10182.50","margin":"120.00",
                   "free_margin":"10062.50","margin_level_percent":"8485.42"},
        "positions":[#{positions == :one ? position : ''}],
@@ -65,6 +67,11 @@ class EaContractTest < ActionDispatch::IntegrationTest
     assert_equal "XAUUSD", connection.symbol
     assert_equal BigDecimal("2318.40"), connection.bid
     assert_equal 5, connection.spread_points
+    assert_equal "BUY_ACTIVE", connection.execution_state
+    assert_equal "entry filled", connection.execution_reason
+    assert_equal BigDecimal("2316.40"), connection.reversal_level
+    assert_equal BigDecimal("-12.50"), connection.daily_profit
+    assert_nil connection.risk_halt, "an empty halt means none"
 
     snapshot = @user.account_snapshots.sole
     assert_equal "USD", snapshot.currency
@@ -106,6 +113,30 @@ class EaContractTest < ActionDispatch::IntegrationTest
       "after the EA closes a basket it reports an empty array, which must close the records"
   end
 
+  # The EA re-fetches its configuration when the report response names a
+  # different version, which is how a stop or an emergency stop reaches it
+  # within one report instead of one refresh interval.
+  test "the report response carries the configuration version the EA compares" do
+    get "/api/v1/strategies/#{@strategy.id}", headers: headers
+    held = JSON.parse(response.body).dig("strategy", "config_version")
+
+    post "/api/v1/trading/report", params: ea_payload, headers: headers
+    assert_equal held, JSON.parse(response.body)["config_version"]
+
+    travel 1.second do
+      Strategies::EmergencyStop.call(strategy: @strategy, actor: @user)
+      post "/api/v1/trading/report", params: ea_payload, headers: headers
+      assert_not_equal held, JSON.parse(response.body)["config_version"]
+    end
+  end
+
+  test "an EA older than the state machine still reports, with no state stored" do
+    post "/api/v1/trading/report", params: ea_payload.sub(/"execution":\{[^}]*\},/, ""), headers: headers
+
+    assert_response :accepted
+    assert_nil @user.terminal_connections.sole.execution_state
+  end
+
   test "a report naming an unknown strategy is refused, not silently accepted" do
     post "/api/v1/trading/report", params: ea_payload(strategy_id: 999_999), headers: headers
 
@@ -133,8 +164,10 @@ class EaContractTest < ActionDispatch::IntegrationTest
     %w[take_profit stop_loss].each do |key|
       assert strategy.fetch("basket").key?(key), "basket.#{key} missing — the EA reads it"
     end
+    assert strategy.fetch("entry").key?("distance_points"), "entry.distance_points missing — the EA reads it"
+    assert strategy.key?("config_version"), "config_version missing — the EA compares it with report responses"
     %w[max_positions max_exposure_lots max_drawdown_percent
-       min_margin_level_percent max_spread_points].each do |key|
+       min_margin_level_percent max_spread_points max_daily_loss emergency_stop].each do |key|
       assert strategy.fetch("risk").key?(key), "risk.#{key} missing — the EA enforces it"
     end
   end
@@ -171,6 +204,24 @@ class EaContractTest < ActionDispatch::IntegrationTest
     assert_nil strategy.dig("trailing", "activation_points")
     # Never null: the EA would otherwise modify the position on every tick.
     assert_equal Strategy::TRAILING_STEP_DEFAULT_POINTS, strategy.dig("trailing", "step_points")
+  end
+
+  # The flat bracket distance is sent as the value the EA should use, so a
+  # blank field reaches the terminal as the trailing distance, not as null.
+  test "a reversal strategy sends its effective entry distance" do
+    @strategy.stop!
+    reversal = @user.strategies.create!(
+      name: "XAUUSD reversal", category: "reversal", direction: "both",
+      initial_lot: 0.01, trailing_stop_points: 200,
+      max_positions: 1, max_exposure_lots: 0.5
+    )
+
+    get "/api/v1/strategies/#{reversal.id}", headers: headers
+    assert_equal 200, JSON.parse(response.body).dig("strategy", "entry", "distance_points")
+
+    reversal.update!(entry_distance_points: 350)
+    get "/api/v1/strategies/#{reversal.id}", headers: headers
+    assert_equal 350, JSON.parse(response.body).dig("strategy", "entry", "distance_points")
   end
 
   test "status values the EA branches on are exactly the ones emitted" do

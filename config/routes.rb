@@ -72,6 +72,7 @@ Rails.application.routes.draw do
     member do
       post :start
       post :stop
+      post :emergency_stop
     end
   end
   # The user's managed MT5 terminal. Singular: a user has one.
@@ -124,6 +125,7 @@ Rails.application.routes.draw do
         member do
           post :start
           post :stop
+          post :emergency_stop
         end
       end
 

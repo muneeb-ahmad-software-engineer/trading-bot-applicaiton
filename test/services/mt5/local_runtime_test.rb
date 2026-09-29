@@ -286,7 +286,10 @@ class LocalRuntimeTest < ActiveSupport::TestCase
   test "diagnostics surface what MetaTrader and the EA said went wrong, once each" do
     with_local_runtime do
       instance = provision!(@user)
-      instance.update_columns(started_at: Time.utc(2026, 9, 28, 16, 0))
+      # MetaTrader stamps its logs in the local time of the machine it runs on,
+      # and the parser reads them that way. The start time has to be built in
+      # the same zone, or the test only passes on a machine set to UTC.
+      instance.update_columns(started_at: Time.new(2026, 9, 28, 16, 0))
       runtime = Mt5::Runtime::Local.new(instance.worker_node)
 
       write_log(File.join(instance.terminal_dir, "logs"), [

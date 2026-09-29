@@ -17,7 +17,12 @@ module Api
           if result.success?
             render json: {
               accepted_at: Time.current.utc.iso8601,
-              connection: { status: result.connection.status, symbol: result.connection.symbol }
+              connection: { status: result.connection.status, symbol: result.connection.symbol },
+              # The EA compares this with the config_version of the
+              # configuration it holds and re-fetches at once when they differ,
+              # so a stop or an emergency stop reaches it within one report
+              # interval rather than at its next scheduled refresh.
+              config_version: result.connection.strategy&.config_version
             }, status: :accepted
           else
             render json: { error: { code: "invalid_report", message: result.errors.to_sentence } },
@@ -31,6 +36,7 @@ module Api
           params.permit(
             :strategy_id,
             terminal: %i[ea_version broker account_login symbol],
+            execution: %i[state reason reversal_level daily_profit risk_halt],
             tick: %i[bid ask spread_points],
             account: %i[currency balance equity margin free_margin margin_level_percent],
             positions: %i[ticket direction grid_level volume open_price current_price stop_loss profit swap commission opened_at],

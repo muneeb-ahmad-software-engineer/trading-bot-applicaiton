@@ -174,6 +174,19 @@
               step the terminal would be asked to modify the position on almost every tick.
             </p>
           </div>
+
+          <div class="field" data-strategy-category-target="reversal">
+            <%= label_with_info(form, :entry_distance_points, "Entry distance (points)") %>
+            <%= form.number_field :entry_distance_points, class: "input-numeric", min: 1,
+                  "aria-describedby": "entry_distance_hint",
+                  "aria-invalid": strategy.errors[:entry_distance_points].any? %>
+            <p class="field-hint" id="entry_distance_hint">
+              Reversal only. While flat, a Buy Stop rests this far above the price and a
+              Sell Stop this far below; the first one reached becomes the trade and the other
+              is cancelled. <%= points_as_price_hint(strategy.entry_distance_points) %>
+              Leave blank to use the trailing distance.
+            </p>
+          </div>
         </div>
       </fieldset>
     </div>
@@ -234,6 +247,16 @@
             <%= form.number_field :max_spread_points, class: "input-numeric", min: 1,
                   "aria-describedby": "spread_hint", "aria-invalid": strategy.errors[:max_spread_points].any? %>
             <p class="field-hint" id="spread_hint">New orders are skipped while the spread is wider than this.</p>
+          </div>
+          <div class="field field-wide">
+            <%= label_with_info(form, :max_daily_loss, "Maximum daily loss") %>
+            <%= form.number_field :max_daily_loss, class: "input-numeric", step: 0.01, min: 0.01,
+                  "aria-describedby": "daily_loss_hint", "aria-invalid": strategy.errors[:max_daily_loss].any? %>
+            <p class="field-hint" id="daily_loss_hint">
+              In account currency. Once today's closed and open results for this strategy lose this much,
+              every position is closed and nothing new opens until the broker's next trading day.
+              Leave blank for no daily limit.
+            </p>
           </div>
         </div>
       </fieldset>

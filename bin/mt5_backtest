@@ -1,0 +1,334 @@
+#!/usr/bin/env bash
+# Runs the GoldGrid EA through the MetaTrader 5 Strategy Tester, headless, and
+# checks the refactor's acceptance criteria (trailing-strategy-refactoring.md).
+#
+#   bin/mt5_backtest --pause-app                    # every scenario, 1–26 Sep 2026
+#   bin/mt5_backtest --pause-app chaos              # one scenario
+#   bin/mt5_backtest --pause-app chaos 2026.09.01 2026.09.26
+#   bin/mt5_backtest --pause-app --monthly 2025.01 2026.09
+#                                                   # the reversal strategy, one
+#                                                   # calendar month at a time,
+#                                                   # with a table of results
+#
+# Scenarios (see scenario_inputs below):
+#   baseline   reversal strategy, no interference
+#   chaos      reversal strategy with a failure injected every ~20 minutes:
+#              manual close, extra position, stray order, EA restart, tick storm
+#   trailing   trailing category, both directions, with chaos
+#   dailyloss  reversal with a tight daily loss limit
+#   spread     reversal with a tight spread limit (reversals must wait or abandon)
+#
+# Environment:
+#   MT5_BACKTEST_MODEL    0 = every tick generated from M1 (default, fast)
+#                         4 = every tick based on REAL ticks (slower, needs the
+#                             broker's tick history, closer to live)
+#   MT5_BACKTEST_TIMEOUT  seconds per run before it is killed (default 1800)
+#
+# PORT 3000. The tester's local agent always listens on 127.0.0.1:3000 (the
+# port is fixed inside MetaTrader's encrypted agents.dat), which is also the
+# platform's port. While anything else answers there the tester cannot reach
+# its agent and fails with "tester agent authorization error". --pause-app
+# stops the `app` service of compose.yaml for the run and starts it again on
+# exit, whatever happens; the database is left running. It REFUSES while any
+# strategy is running, because stopping the app also stops the managed
+# terminals inside it. Without the flag the script refuses to start while the
+# port is taken.
+#
+# The tester runs in a PORTABLE COPY of the local MetaTrader install
+# (tmp/mt5-backtest/terminal), so a terminal already open on this machine —
+# trading or not — is not touched. The EA's invariant monitor
+# (mt5/Include/GoldGrid/Tester.mqh) prints one TEST SUMMARY line per run and an
+# INVARIANT VIOLATION line for every breach; this script fails if there is any
+# violation or no summary at all.
+#
+# macOS only for now, like bin/mt5_compile.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+PREFIX="${MT5_WINEPREFIX:-$HOME/Library/Application Support/net.metaquotes.wine.metatrader5}"
+WINE="${MT5_WINE_BINARY:-/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine}"
+SOURCE="${MT5_TERMINAL_DIR:-$PREFIX/drive_c/Program Files/MetaTrader 5}"
+WORK="${MT5_BACKTEST_DIR:-$REPO/tmp/mt5-backtest}"
+TERMINAL="$WORK/terminal"
+RESULTS="$WORK/results"
+AGENT_LOGS="$TERMINAL/Tester/Agent-127.0.0.1-3000/logs"
+TIMEOUT_SECONDS="${MT5_BACKTEST_TIMEOUT:-1800}"
+MODEL="${MT5_BACKTEST_MODEL:-0}"
+
+PAUSE_APP=0
+MONTHLY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --pause-app) PAUSE_APP=1; shift ;;
+    --monthly)   MONTHLY=1; shift ;;
+    *) break ;;
+  esac
+done
+
+ALL_SCENARIOS=(baseline chaos trailing dailyloss spread)
+if [ "$MONTHLY" = 1 ]; then
+  FIRST_MONTH="${1:-2025.01}"
+  LAST_MONTH="${2:-2026.09}"
+else
+  SCENARIO="${1:-all}"
+  FROM="${2:-2026.09.01}"
+  TO="${3:-2026.09.26}"
+fi
+
+[ -x "$WINE" ] || { echo "wine not found at: $WINE" >&2; exit 1; }
+[ -f "$SOURCE/terminal64.exe" ] || { echo "MetaTrader not found at: $SOURCE" >&2; exit 1; }
+case "$TERMINAL" in *" "*) echo "The backtest directory must not contain spaces: $TERMINAL" >&2; exit 1;; esac
+
+# Tester inputs per scenario, one Name=value per line. Anything not listed
+# keeps the EA's default.
+scenario_inputs() {
+  local common="InpAllowTrading=true
+InpReentryCooldownSeconds=60
+InpTestLot=0.01
+InpTestTrailingPoints=300
+InpTestStepPoints=20"
+  case "$1" in
+    baseline)  printf '%s\nInpTestCategory=2\nInpChaosEveryMinutes=0\n' "$common" ;;
+    chaos)     printf '%s\nInpTestCategory=2\nInpChaosEveryMinutes=20\nInpChaosSeed=7\n' "$common" ;;
+    trailing)  printf '%s\nInpTestCategory=1\nInpChaosEveryMinutes=20\nInpChaosSeed=11\n' "$common" ;;
+    dailyloss) printf '%s\nInpTestCategory=2\nInpTestMaxDailyLoss=15\nInpChaosEveryMinutes=0\n' "$common" ;;
+    spread)    printf '%s\nInpTestCategory=2\nInpTestMaxSpreadPoints=25\nInpChaosEveryMinutes=0\n' "$common" ;;
+    *) echo "unknown scenario: $1 (expected one of: ${ALL_SCENARIOS[*]})" >&2; exit 2 ;;
+  esac
+}
+
+# UTF-16LE with a BOM, which is what MetaTrader writes and reads for .set files.
+utf16() { printf '\xFF\xFE'; iconv -f UTF-8 -t UTF-16LE; }
+from_utf16() { iconv -f UTF-16LE -t UTF-8 2>/dev/null | tr -d '\r' | sed $'s/^\xEF\xBB\xBF//'; }
+
+# One field of a TEST SUMMARY line: `field summary name`.
+field() { printf '%s\n' "$1" | grep -o "| $2=[^ |]*" | head -1 | cut -d= -f2; }
+
+prepare() {
+  echo "==> Compiling the EA"
+  "$REPO/bin/mt5_compile" | tail -2
+
+  echo "==> Syncing a portable copy of MetaTrader into ${TERMINAL#"$REPO"/}"
+  mkdir -p "$TERMINAL" "$RESULTS"
+  # No --delete: history the tester has downloaded into the copy is kept
+  # between runs. Logs and tester caches are the copy's own. Only top-level
+  # .ini files are skipped — config/common.ini holds the account.
+  rsync -a --exclude 'logs/' --exclude 'MQL5/Logs/' --exclude 'Tester/' \
+        --exclude 'llm-agent/' --exclude '/*.ini' "$SOURCE/" "$TERMINAL/"
+  cp "$SOURCE/MQL5/Experts/GoldGrid.ex5" "$TERMINAL/MQL5/Experts/GoldGrid.ex5"
+  mkdir -p "$TERMINAL/MQL5/Profiles/Tester"
+
+  # The tester refuses to start without an account to take symbol settings
+  # and history from: the one the local terminal is signed in to.
+  LOGIN=$(from_utf16 < "$SOURCE/config/common.ini" | sed -n 's/^Login=//p' | head -1)
+  SERVER=$(from_utf16 < "$SOURCE/config/common.ini" | sed -n 's/^Server=//p' | head -1)
+  [ -n "$LOGIN" ] || { echo "The local terminal is not signed in to any account (no Login in common.ini)." >&2; exit 1; }
+  echo "    account $LOGIN on $SERVER, model $MODEL"
+}
+
+port_3000_taken() { lsof -nP -iTCP:3000 -sTCP:LISTEN >/dev/null 2>&1; }
+
+free_port_3000() {
+  port_3000_taken || return 0
+  if [ "$PAUSE_APP" != 1 ]; then
+    echo "Port 3000 is in use (the platform?), and the tester's agent needs it." >&2
+    echo "Stop it, or rerun with --pause-app to stop the Docker app for the run." >&2
+    exit 1
+  fi
+
+  # Stopping the app stops every managed terminal inside it. Never do that to
+  # a strategy that is live.
+  local running
+  if ! running=$(cd "$REPO" && docker compose exec -T app bin/rails runner \
+                   'puts "RUNNING:" + Strategy.where(status: "running").map { |s| "##{s.id} #{s.name}" }.join(", ")' \
+                   2>/dev/null | grep '^RUNNING:' | tail -1); then
+    echo "Could not ask the platform whether a strategy is running (is the app container healthy?)." >&2
+    echo "Refusing to stop it blind. Check 'docker compose ps' and try again." >&2
+    exit 1
+  fi
+  running=${running#RUNNING:}
+  if [ -n "$running" ]; then
+    echo "Refusing to stop the Docker app: strategy $running is running, and its terminal would stop with it." >&2
+    echo "Stop the strategy first, or free port 3000 some other way." >&2
+    exit 1
+  fi
+
+  echo "==> Stopping the Docker app for the run (it is restarted on exit)"
+  ( cd "$REPO" && docker compose stop app >/dev/null 2>&1 )
+  trap 'echo "==> Starting the Docker app again"; ( cd "$REPO" && docker compose start app >/dev/null 2>&1 )' EXIT
+  for _ in $(seq 1 30); do port_3000_taken || return 0; sleep 1; done
+  echo "Port 3000 is still in use after stopping the app." >&2
+  exit 1
+}
+
+# run_test NAME FROM TO — runs one tester pass with MQL5/Profiles/Tester/goldgrid_NAME.set
+# and leaves the run's own EA log in $RESULTS/NAME.log. Returns non-zero if the
+# tester produced no summary.
+run_test() {
+  local name="$1" from="$2" to="$3"
+  local ini="$TERMINAL/goldgrid_${name}.ini"
+  local log="$RESULTS/${name}.log"
+
+  cat > "$ini" <<EOF
+[Common]
+Login=$LOGIN
+Server=$SERVER
+
+[Tester]
+Expert=GoldGrid.ex5
+ExpertParameters=goldgrid_${name}.set
+Symbol=XAUUSD
+Period=M1
+Model=$MODEL
+FromDate=$from
+ToDate=$to
+ForwardMode=0
+Deposit=10000
+Currency=USD
+Leverage=1:100
+ExecutionMode=0
+Optimization=0
+Visual=0
+Report=goldgrid_${name}
+ReplaceReport=1
+ShutdownTerminal=1
+EOF
+
+  local started; started=$(date +%s)
+  ( cd "$TERMINAL" && WINEPREFIX="$PREFIX" WINEDEBUG=-all \
+      "$WINE" terminal64.exe /portable "/config:goldgrid_${name}.ini" >/dev/null 2>&1 ) &
+  local pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( $(date +%s) - started > TIMEOUT_SECONDS )); then
+      echo "    timed out after ${TIMEOUT_SECONDS}s" >&2
+      kill "$pid" 2>/dev/null || true
+      break
+    fi
+    sleep 3
+  done
+  wait "$pid" 2>/dev/null || true
+
+  # The terminal can exit while its tester agent is still writing the run's
+  # last lines — the summary among them. Wait for the agent to be gone and
+  # its log to stop growing before reading it.
+  for _ in $(seq 1 30); do
+    pgrep -f "mt5-backtest.*metatester64" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  local last_size=-1 size
+  for _ in $(seq 1 15); do
+    size=$(stat -f %z "$(ls -t "$AGENT_LOGS"/*.log 2>/dev/null | head -1)" 2>/dev/null || echo 0)
+    [ "$size" = "$last_size" ] && break
+    last_size=$size
+    sleep 1
+  done
+  ELAPSED=$(( $(date +%s) - started ))
+
+  # The agent appends every run of the day to one file, and MetaTrader cuts
+  # that file back when it grows large — so neither "the whole file" nor
+  # "whatever was added since" is reliably this run. The run is found by its
+  # own start line, "testing of Experts\GoldGrid.ex5 from <from> 00:00",
+  # taking the last one: everything from there on is this run's.
+  local agent_log
+  agent_log=$(ls -t "$AGENT_LOGS"/*.log 2>/dev/null | head -1 || true)
+  if [ -z "$agent_log" ]; then
+    echo "    no tester agent log was written. The terminal's journal says:" >&2
+    from_utf16 < "$(ls -t "$TERMINAL"/logs/*.log | head -1)" | tail -8 >&2 || true
+    return 1
+  fi
+  from_utf16 < "$agent_log" \
+    | awk -v start="GoldGrid.ex5 from ${from} 00:00" '
+        index($0, start) && index($0, "testing of") { n = 0; delete buf }
+        { buf[++n] = $0 }
+        END { for (i = 1; i <= n; i++) print buf[i] }' > "$log"
+
+  SUMMARY=$(grep -o 'TEST SUMMARY.*' "$log" | tail -1 || true)
+  VIOLATIONS=$(grep -c 'INVARIANT VIOLATION' "$log" || true)
+  if [ -z "$SUMMARY" ]; then
+    echo "    no TEST SUMMARY in ${log#"$REPO"/} — did the test start?" >&2
+    grep -iE 'error|failed|cannot|critical' "$log" | tail -8 >&2 || true
+    return 1
+  fi
+}
+
+run_scenario() {
+  local name="$1"
+  scenario_inputs "$name" | utf16 > "$TERMINAL/MQL5/Profiles/Tester/goldgrid_${name}.set"
+
+  echo "==> [$name] XAUUSD M1, $FROM → $TO"
+  run_test "$name" "$FROM" "$TO" || { echo "    FAILED"; return 1; }
+
+  echo "    ${ELAPSED}s — log: ${RESULTS#"$REPO"/}/${name}.log"
+  echo "    $SUMMARY"
+  if [ "$VIOLATIONS" -gt 0 ]; then
+    echo "    FAILED: $VIOLATIONS invariant violation(s):" >&2
+    grep 'INVARIANT VIOLATION' "$RESULTS/${name}.log" | head -10 >&2
+    return 1
+  fi
+  echo "    PASSED"
+}
+
+# The first day of the month after YYYY.MM.
+next_month() {
+  local y=${1%%.*} m=${1##*.}
+  m=$((10#$m + 1)); if [ "$m" -gt 12 ]; then m=1; y=$((y + 1)); fi
+  printf '%04d.%02d' "$y" "$m"
+}
+
+run_monthly() {
+  local model_name="generated"; [ "$MODEL" = 4 ] && model_name="realticks"
+  local csv="$RESULTS/monthly-${model_name}-${FIRST_MONTH}-${LAST_MONTH}.csv"
+  scenario_inputs baseline | utf16 > "$TERMINAL/MQL5/Profiles/Tester/goldgrid_month.set"
+
+  echo "month,gold_start,gold_end,gold_change_pct,gold_range,trades,reversals,net_profit,profit_factor,win_rate_pct,max_drawdown_pct,max_positions,violations" > "$csv"
+  printf '\n%-8s %9s %9s %8s %7s %7s %9s %6s %6s %7s %5s\n' \
+         month "gold" "change%" "range" trades revers "profit" "PF" "win%" "maxDD%" viol
+  printf '%s\n' "------------------------------------------------------------------------------------------"
+
+  local month="$FIRST_MONTH" failed=0
+  while :; do
+    local next; next=$(next_month "$month")
+    if run_test "month" "${month}.01" "${next}.01"; then
+      cp "$RESULTS/month.log" "$RESULTS/month-${month}.log"
+      local s="$SUMMARY"
+      printf '%-8s %9s %9s %8s %7s %7s %9s %6s %6s %7s %5s\n' "$month" \
+        "$(field "$s" market_end)" "$(field "$s" market_change_pct)" "$(field "$s" market_range)" \
+        "$(field "$s" trades)" "$(field "$s" reversals)" "$(field "$s" net_profit)" \
+        "$(field "$s" profit_factor)" "$(field "$s" win_rate)" "$(field "$s" max_drawdown_pct)" "$VIOLATIONS"
+      echo "$month,$(field "$s" market_start),$(field "$s" market_end),$(field "$s" market_change_pct),$(field "$s" market_range),$(field "$s" trades),$(field "$s" reversals),$(field "$s" net_profit),$(field "$s" profit_factor),$(field "$s" win_rate),$(field "$s" max_drawdown_pct),$(field "$s" max_positions),$VIOLATIONS" >> "$csv"
+      [ "$VIOLATIONS" -gt 0 ] && failed=$((failed + 1))
+    else
+      printf '%-8s  (no result — see %s)\n' "$month" "${RESULTS#"$REPO"/}/month.log"
+      failed=$((failed + 1))
+    fi
+    [ "$month" = "$LAST_MONTH" ] && break
+    month="$next"
+  done
+
+  echo
+  echo "Table saved to ${csv#"$REPO"/}"
+  return "$failed"
+}
+
+prepare
+free_port_3000
+
+if [ "$MONTHLY" = 1 ]; then
+  if run_monthly; then echo "Every month ran with no invariant violations."; exit 0; fi
+  echo "Some months had violations or no result." >&2
+  exit 1
+fi
+
+if [ "$SCENARIO" = "all" ]; then scenarios=("${ALL_SCENARIOS[@]}"); else scenarios=("$SCENARIO"); fi
+
+failed=0
+for name in "${scenarios[@]}"; do
+  run_scenario "$name" || failed=$((failed + 1))
+done
+
+echo
+if [ "$failed" -gt 0 ]; then
+  echo "$failed of ${#scenarios[@]} scenario(s) failed." >&2
+  exit 1
+fi
+echo "All ${#scenarios[@]} scenario(s) passed."

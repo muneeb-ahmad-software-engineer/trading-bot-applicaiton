@@ -51,6 +51,10 @@ module Trading
       connection = TerminalConnection.find_or_initialize_by(api_token: api_token)
       terminal = params.fetch(:terminal, {})
       tick = params.fetch(:tick, {})
+      # Absent from EAs that predate the state machine (and from grid
+      # strategies' reports on those builds). Absent means unknown, so the
+      # columns are cleared rather than left showing an old state.
+      execution = params.fetch(:execution, {})
 
       connection.assign_attributes(
         user:,
@@ -62,6 +66,11 @@ module Trading
         bid: tick[:bid],
         ask: tick[:ask],
         spread_points: tick[:spread_points],
+        execution_state: execution[:state].presence,
+        execution_reason: execution[:reason].to_s.truncate(255).presence,
+        reversal_level: positive_decimal(execution[:reversal_level]),
+        daily_profit: execution[:daily_profit].presence,
+        risk_halt: execution[:risk_halt].to_s.truncate(255).presence,
         last_report_at: Time.current
       )
       first_report = connection.new_record? || connection.last_report_at.nil?
@@ -114,6 +123,14 @@ module Trading
     # MT5 reports "no stop attached" as a price of zero. That is a different
     # fact from a stop at price zero, and storing it as a number would put a
     # 0.00000 stop level in front of the user on every position that has none.
+    # A price the EA sends as zero when it has none.
+    def positive_decimal(value)
+      return nil if value.blank?
+      return nil if value.to_d <= 0
+
+      value
+    end
+
     def reported_stop_loss(value)
       return nil if value.blank?
       return nil if value.to_d.zero?

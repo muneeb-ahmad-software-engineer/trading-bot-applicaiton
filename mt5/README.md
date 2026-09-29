@@ -112,6 +112,7 @@ and your account.
 | `InpMagicNumber` | Identifies this EA's orders. Change it if you run two instances. |
 | `InpSlippagePoints` | Maximum price deviation on market orders. |
 | `InpAllowTrading` | **Master switch. Off by default.** |
+| `InpReentryCooldownSeconds` | Trailing / reversal only: seconds to wait after a position closes before any new entry (default 60). |
 
 `InpAllowTrading` is off deliberately. Leave it off for the first run: the EA
 will connect, fetch configuration and report state so you can confirm the
@@ -147,41 +148,174 @@ manage it, which is why stopping does not disable exits.
 
 ---
 
-## The two strategy categories
+## The strategy categories
 
 `category` on the strategy decides how positions are **opened**. It does not
-decide how they exit — either category can carry a trailing stop.
+decide how they exit — every category can carry a trailing stop.
 
 | Category | Opens | Exits with |
 | --- | --- | --- |
 | `grid` | A level at a time, as price moves against the basket | Basket take profit / stop loss, and optionally a trailing stop per position |
-| `trailing` | One position per direction, and nothing more until it closes | Its trailing stop (mandatory), plus the basket exits if set |
+| `trailing` | **One position in total**, at market, and nothing more until it closes | Its trailing stop (mandatory), plus the basket exits if set |
+| `reversal` | **One position in total**. Flat, it brackets the market with a buy stop and a sell stop; after that it flips side each time the trailing stop is hit | Its trailing stop (mandatory), which is also the reversal trigger |
 
-### Both directions, continuously
+### Grid, both directions
 
-With `direction: both`, the buy side and the sell side are run **independently
-and continuously**. Each one:
+With `direction: both` a **grid** runs its buy basket and sell basket
+independently. Each re-opens once it is flat. The ceilings (`max_positions`,
+`max_exposure_lots`, drawdown, margin) apply across both together.
 
-1. opens at market when that direction is flat,
-2. is managed on its own — its own exits, its own trailing stop,
-3. **opens again on the next pass once it is closed.**
+> **This needs a hedging account.** On a netting account a buy and a sell on one
+> symbol cancel out. The EA says so at startup and refuses the opposing side.
 
-A buy being stopped out does not disturb a sell that is still running, and
-neither side ever needs restarting between trades. The open cooldown that stops
-a fill being double-counted is held per direction, so both sides can open on the
-same pass rather than three seconds apart.
+### One active position — trailing and reversal
 
-The ceilings still apply across both sides together: `max_positions`,
-`max_exposure_lots`, drawdown and margin protection are account-wide, not
-per-direction.
+A trailing or reversal strategy holds **zero or one** position. A buy and a
+sell are never open together, whatever the direction setting. This is enforced
+in the EA on every entry path:
 
-> **This needs a hedging account.** On a netting account MT5 holds one position
-> per symbol, so sending a sell while a buy is open reduces or reverses it
-> rather than adding a second position — a both-directions strategy would spend
-> the session cancelling itself out. The EA detects this at startup, says so in
-> the log, and refuses the opposing side with
-> *"This is a netting account, and the opposite direction is already open"*.
-> Set the strategy to buy only or sell only, or move to a hedging account.
+1. **Reconciled before every entry.** The broker's actual positions (this
+   magic number and symbol only) are counted immediately before an order is
+   sent. If any is open, nothing is sent.
+2. **Settling lock.** Once an order is sent or a fill is seen, new entries are
+   refused for a few seconds, so a position that has not yet appeared in the
+   terminal cannot be mistaken for "flat".
+3. **One-cancels-the-other.** When one side of a reversal bracket fills, the
+   other pending order is cancelled straight away from `OnTradeTransaction`.
+   While a position is open, no pending order rests at all.
+4. **Breach repair (RECOVERY).** If more than one position is ever found (a
+   spike that fills both bracket sides at once, a restart into an old account
+   state), the EA enters `RECOVERY`. It cancels all pending orders and closes
+   every position except the newest. It only leaves `RECOVERY` once the
+   broker's positions have looked consistent for 10 seconds.
+5. **No immediate re-entry.** After any close, including a stop-loss, nothing
+   new opens for `InpReentryCooldownSeconds`. Re-entering straight after each
+   stop-out is what turned single losses into strings of them.
+
+#### The initial bracket (reversal)
+
+While flat, a reversal strategy rests **exactly one Buy Stop** the entry
+distance above the ask and **one Sell Stop** the same distance below the bid.
+The entry distance is set on the platform and falls back to the trailing
+distance when left blank. Each order carries its own stop-loss at the trailing
+distance, so the position is protected from its first tick.
+
+- The first order to fill becomes the only position, and the other is cancelled
+  immediately.
+- Any duplicate order on the same side, or an order of any other type with
+  this magic number, is deleted.
+- Each order's comment records its strategy and distance
+  (`GG:<id>:L1:D<points>`). If the distance, strategy or lot size changes, both
+  orders are withdrawn and placed again around the current price.
+- An entry distance inside the broker's minimum stop level is widened to the
+  nearest accepted distance, and the log says so.
+- While flat, a resting order is never moved, because it may be filling at
+  that moment.
+
+#### Execution state
+
+Each trailing or reversal EA runs a small state machine. It is saved in terminal
+global variables (`GoldGrid.<magic>.<symbol>.*`) and every transition is logged
+as `GoldGrid: state A -> B (reason)`.
+
+| State | Meaning |
+| --- | --- |
+| `INITIALIZING` | Just started. The EA reads the broker's positions before doing anything. |
+| `WAITING` | Flat. The only state an entry can be placed from. |
+| `BUY_ACTIVE` / `SELL_ACTIVE` | Exactly one position open. |
+| `CLOSING` | The EA sent a close and is waiting for the broker to confirm it. A close only counts as confirmed when the position has left the open list **and** its closing deal is in the history. If that doesn't happen within 15 s, the state becomes `RECOVERY`. |
+| `RECOVERY` | Something is unexpected or unconfirmed. Nothing is opened. |
+| `REVERSAL_PENDING` | The position's stop (the reversal level) closed it; entries locked until the close is confirmed. |
+| `OPENING_REVERSE` | Close confirmed, account flat, opposite side being opened. |
+
+After a restart the EA always starts from `INITIALIZING` and decides from what
+the broker actually holds. The time of the last close is saved in wall-clock
+time, so the re-entry cooldown also holds across a restart.
+
+#### The reversal (confirmed close, then open)
+
+The trailing entry for the opposite side is **virtual**. Its level is the open
+position's own broker-side stop, which trails in the favourable direction only
+and never moves back.
+
+1. **BUY open.** Its stop trails up behind price. The log shows
+   `reversal level — SELL opens if price reaches X` each time it moves.
+2. **Price turns by the trailing distance.** The **broker** closes the BUY at
+   its stop. This happens even if the terminal is offline.
+3. **`REVERSAL_PENDING`.** Entries are locked. The EA waits until the broker
+   confirms the BUY is closed (gone from the open list *and* its closing deal
+   is in the history) and checks that zero positions are open.
+4. **`OPENING_REVERSE`.** The EA opens the SELL at market, with its stop
+   attached in the same request, after the full risk gate (spread included).
+5. **`SELL_ACTIVE`.** Mirror image: its stop trails down, and a BUY opens if
+   price reaches it.
+
+A buy and a sell are never open together, because the new side's order doesn't
+exist until the old side is confirmed closed. While the terminal is offline,
+the worst case is ending up flat.
+
+When it does **not** reverse:
+- **Not a stop-loss close.** Take profit, manual close, stop-out or a basket
+  exit sends the strategy back to `WAITING`, with the cooldown and then a new
+  bracket.
+- **Trading not allowed.** Strategy stopped, `AllowTrading` off, or the EA
+  halted: back to `WAITING`.
+- **Close not confirmed within 15 s.** The state becomes `RECOVERY` and nothing
+  is opened.
+- **Opposite order can't be sent within 30 s** (spread too wide, market closed)
+  or is rejected 3 times: the reversal is abandoned and the strategy returns to
+  `WAITING`.
+- **Order accepted but no position appears within 10 s.** The state becomes
+  `RECOVERY`. The order is never sent twice.
+- **Terminal restarted in the middle of a reversal.** The EA re-reads the
+  broker from `INITIALIZING`. If it is flat, it waits out the cooldown and
+  brackets again rather than reversing late.
+
+A gap fills the stop beyond its level. The log reports the slippage in points
+on every reversal.
+
+#### Trailing category, both directions
+
+A `trailing` strategy with `direction: both` still holds one position at a
+time. After a close, the next entry is the **opposite** side of the position
+that just closed. The very first entry is a buy.
+
+---
+
+## Risk halts: emergency stop and daily loss
+
+Every category has two limits that act on what is **already open**. The other
+risk gates only refuse new entries; these close positions too:
+
+| Halt | Set on the platform | What the EA does |
+| --- | --- | --- |
+| **Emergency stop** | The *Emergency stop* button on the strategy page (or `POST /api/v1/strategies/:id/emergency_stop`) | Cancels every pending order, closes every position of this strategy at market, and opens nothing. It stays in force until the strategy is **started** again. |
+| **Maximum daily loss** | `max_daily_loss` in the strategy's risk controls (account currency; blank = none) | When today's result for this EA (closed deals since the start of the broker's trading day, plus the floating result of open positions, net of swap and commission) reaches −limit, it closes everything the same way and opens nothing until the broker's next trading day. |
+
+- **What "today" counts.** Every deal closed since the broker's midnight,
+  plus the full floating result of what is still open. A position carried
+  over midnight therefore brings its result from the previous day with it. A
+  position that was already near the limit at midnight can trip the halt soon
+  after the new day starts. That is deliberately conservative, since the loss
+  is real either way.
+- While a halt is in force a reversal does **not** happen. The strategy lands
+  in `WAITING` and the gate keeps it there.
+- A single position is closed through `CLOSING`, so the broker confirms the
+  close like any other. Failed closes are retried every 5 s.
+- With `InpAllowTrading` off, a halt only reports. Nothing is sent, closes
+  included.
+
+**How fast an emergency stop arrives.** Every report response carries the
+strategy's `config_version`. When it differs from the configuration the EA
+holds, the EA re-fetches at once, so a stop, an emergency stop or an edit
+normally reaches the terminal within one report interval (`InpReportSeconds`,
+default 10 s).
+
+### What the dashboard shows
+
+Each report carries an `execution` block: the state-machine state and why it
+was entered, the reversal level, today's P/L, and any risk halt in force. The
+strategy page shows these in a **Robot state** card. A grid reports `GRID`.
 
 ---
 
@@ -241,6 +375,85 @@ weekend you can be filled well below the level shown.
 - Basket take profit / stop loss are in **account currency**, not points.
 
 ---
+
+## Automated backtests (Strategy Tester)
+
+`bin/mt5_backtest` runs the EA through the MetaTrader 5 Strategy Tester,
+headless, and checks the refactor's acceptance criteria while it trades:
+
+```
+bin/mt5_backtest --pause-app                         # all scenarios, 1–26 Sep
+bin/mt5_backtest --pause-app chaos 2026.09.15 2026.09.19
+bin/mt5_backtest --pause-app --monthly 2025.01 2026.09   # one month at a time
+MT5_BACKTEST_MODEL=4 bin/mt5_backtest --pause-app baseline  # real broker ticks
+```
+
+It compiles the EA, syncs a **portable copy** of the local MetaTrader install
+into `tmp/mt5-backtest/terminal` (so a terminal you have open is never
+touched), writes the tester config, runs it, and parses the agent log. The
+full log of each run is saved in `tmp/mt5-backtest/results/<scenario>.log`.
+The script exits non-zero if any scenario reports a violation or produces no
+summary.
+
+| Scenario | What it runs |
+| --- | --- |
+| `baseline` | Reversal strategy, no interference |
+| `chaos` | Reversal, with a failure injected every ~20 simulated minutes |
+| `trailing` | Trailing category, both directions, with chaos |
+| `dailyloss` | Reversal with a $15 daily loss limit |
+| `spread` | Reversal with a 25-point spread limit, so reversals must wait or be abandoned |
+
+**Tester mode.** The tester can't reach the platform (`WebRequest` is
+unavailable there), so the strategy is built from the *Strategy Tester only*
+inputs (`InpTest*`). They are ignored live. All timers use
+`Include/GoldGrid/Clock.mqh`: simulated time in the tester, monotonic time
+live. Otherwise a 3-second lock would span hours of simulated market.
+
+**The invariant monitor** (`Include/GoldGrid/Tester.mqh`) checks the
+following on every tick and prints `INVARIANT VIOLATION` for each breach:
+1. Never more than one position.
+2. No pending order resting beside an open position (5 s grace for the
+   OCO cancel).
+3. At most one stop per side, and no other order types.
+4. A position's stop never moves backwards.
+5. A manual close is never treated as a reversal.
+
+**The chaos engine** injects, on a seeded schedule:
+- a manual close (the "unexpected close")
+- an extra opposite position (a simultaneous trigger; RECOVERY must repair
+  it within 60 s)
+- a stray pending order
+- a simulated EA restart (in-memory state dropped, persisted state reloaded)
+- a tick storm (the same tick handled 25 times)
+
+Each run ends with one line:
+`TEST SUMMARY | violations=… | max_positions=… | reversals=… | recoveries=… | chaos=… | net_profit=… | profit_factor=… | win_rate=… | max_drawdown_pct=… | market_change_pct=… | market_range=… | …`.
+
+**Month by month (`--monthly`).** This runs the reversal strategy separately
+for each calendar month (the broker's XAUUSD history starts on 23 Dec 2024).
+It prints one table row per month, showing what gold did (closing price,
+change, high–low range) next to what the strategy did (trades, reversals,
+profit, profit factor, win rate, max drawdown, violations). The table is also
+saved as `tmp/mt5-backtest/results/monthly-<model>-<from>-<to>.csv`. Comparing trending, quiet and
+volatile months shows how the logic behaves in each kind of market.
+
+**Price data.** The default model (`0`) generates ticks from one-minute bars,
+which is fast. `MT5_BACKTEST_MODEL=4` uses the broker's **real** recorded
+ticks: slower, with a large first download, but spreads and price paths are as
+they actually were. Use it before drawing conclusions from any single month.
+
+**Port 3000.** The tester's local agent always listens on `127.0.0.1:3000`.
+That port is fixed inside MetaTrader's encrypted `agents.dat`, and it is also
+the platform's port. `--pause-app` stops the Docker `app` service for the run
+and restarts it on exit. It **refuses while any strategy is running**, because
+stopping the app also stops the managed terminals inside it. Without the flag
+the script refuses to start while the port is taken.
+
+**What a pass does and doesn't prove.** A pass shows the execution logic
+keeps its invariants across thousands of reversals and injected failures, on
+MetaQuotes' *generated* every-tick data. It says nothing about profitability,
+and the tester can't reproduce a real broker's requotes, rejections or
+partial fills. The demo checklist below still applies before any live use.
 
 ## Demo testing checklist
 

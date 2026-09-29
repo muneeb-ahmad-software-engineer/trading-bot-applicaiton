@@ -630,11 +630,90 @@ class StrategyTest < ActiveSupport::TestCase
     assert_nil build.trailing_stop_price
   end
 
-  # A trailing strategy holds one position per direction, so its ceiling is the
-  # entry size — not a geometric series it has no levels to walk.
-  test "maximum exposure for a trailing strategy is the entry, once per direction" do
-    assert_equal BigDecimal("0.02"), build_trailing(initial_lot: 0.01, direction: "both").maximum_theoretical_lots
+  # A trailing strategy holds one position in total — never a buy and a sell
+  # together — so its ceiling is the entry size, whatever the direction.
+  test "maximum exposure for a trailing strategy is the entry, once in total" do
+    assert_equal BigDecimal("0.01"), build_trailing(initial_lot: 0.01, direction: "both").maximum_theoretical_lots
     assert_equal BigDecimal("0.01"), build_trailing(initial_lot: 0.01, direction: "buy").maximum_theoretical_lots
+    assert_equal BigDecimal("0.01"), build_trailing(category: "reversal", initial_lot: 0.01).maximum_theoretical_lots
+  end
+
+  # --------------------------------------------- daily loss and emergency stop
+
+  test "daily loss boundaries" do
+    assert_valid build(max_daily_loss: nil)
+    assert_valid build(max_daily_loss: 0.01)
+    assert_invalid build(max_daily_loss: 0), :max_daily_loss
+    assert_invalid build(max_daily_loss: -5), :max_daily_loss
+  end
+
+  test "an emergency stop stops the strategy and stays until it is started again" do
+    strategy = build
+    strategy.save!
+    strategy.start!
+
+    strategy.emergency_stop!
+    assert_predicate strategy, :stopped?
+    assert_predicate strategy, :emergency_stopped?
+
+    strategy.start!
+    assert_not_predicate strategy, :emergency_stopped?
+  end
+
+  # A rule added after a strategy was saved must never be what keeps it
+  # trading: stopping writes past validations on purpose.
+  test "a strategy that no longer passes validation can still be stopped and emergency-stopped" do
+    strategy = build
+    strategy.save!
+    strategy.start!
+    strategy.update_column(:max_exposure_lots, 0.001)   # now below what the grid can open
+    assert_not strategy.reload.valid?
+
+    strategy.stop!
+    assert_predicate strategy.reload, :stopped?
+
+    strategy.update_column(:status, "running")
+    before = strategy.reload.config_version
+    travel 1.second do
+      strategy.emergency_stop!
+    end
+    strategy.reload
+    assert_predicate strategy, :stopped?
+    assert_predicate strategy, :emergency_stopped?
+    assert_not_equal before, strategy.config_version, "the EA must see the change and re-fetch"
+  end
+
+  test "an emergency stop on an already stopped strategy keeps its original stop time" do
+    strategy = build
+    strategy.save!
+    strategy.start!
+    strategy.stop!
+    stopped_at = strategy.stopped_at
+
+    travel 1.minute do
+      strategy.emergency_stop!
+    end
+    assert_equal stopped_at, strategy.reload.stopped_at
+    assert_predicate strategy, :emergency_stopped?
+  end
+
+  # --------------------------------------------- entry distance (reversal bracket)
+
+  test "a blank entry distance falls back to the trailing distance for a reversal" do
+    assert_equal 200, build_trailing(category: "reversal").effective_entry_distance_points
+    assert_equal 350, build_trailing(category: "reversal", entry_distance_points: 350).effective_entry_distance_points
+  end
+
+  test "only a reversal strategy has an entry distance" do
+    assert_nil build_trailing(entry_distance_points: 350).effective_entry_distance_points
+    assert_nil build(entry_distance_points: 350).effective_entry_distance_points
+  end
+
+  test "entry distance boundaries" do
+    assert_invalid build_trailing(category: "reversal", entry_distance_points: 0), :entry_distance_points
+    assert_invalid build_trailing(category: "reversal", entry_distance_points: 100_001), :entry_distance_points
+    assert_valid build_trailing(category: "reversal", entry_distance_points: 1)
+    assert_valid build_trailing(category: "reversal", entry_distance_points: nil)
   end
 
   test "a trailing strategy still has to fit inside its exposure ceiling" do

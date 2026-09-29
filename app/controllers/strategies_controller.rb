@@ -4,7 +4,7 @@
 # another account is a 404 rather than a permission error — the existence of
 # someone else's record is not disclosed.
 class StrategiesController < ApplicationController
-  before_action :set_strategy, only: %i[show edit update destroy start stop]
+  before_action :set_strategy, only: %i[show edit update destroy start stop emergency_stop]
 
   def index
     @strategies = current_user.strategies.ordered.includes(:terminal_connection)
@@ -94,6 +94,19 @@ class StrategiesController < ApplicationController
                 notice: "Strategy stopped. No new orders will be placed. Positions already open with your broker are not closed by this action."
   end
 
+  def emergency_stop
+    result = Strategies::EmergencyStop.call(strategy: @strategy, actor: current_user,
+                                            source: "web", ip_address: request.remote_ip)
+
+    if result.success?
+      redirect_to @strategy,
+                  notice: "Emergency stop sent. Your Expert Advisor will close every position and pending order " \
+                          "of this strategy at market as soon as it next reports — normally within seconds."
+    else
+      redirect_to @strategy, alert: result.error_message
+    end
+  end
+
   private
 
   def set_strategy
@@ -123,8 +136,8 @@ class StrategiesController < ApplicationController
     params.expect(strategy: %i[
       name category direction grid_spacing_points grid_levels initial_lot lot_mode
       lot_multiplier trailing_stop_points trailing_activation_points
-      trailing_step_points basket_take_profit basket_stop_loss max_positions
-      max_exposure_lots max_drawdown_percent min_margin_level_percent max_spread_points
+      trailing_step_points entry_distance_points basket_take_profit basket_stop_loss max_positions
+      max_exposure_lots max_drawdown_percent min_margin_level_percent max_spread_points max_daily_loss
     ])
   end
 end

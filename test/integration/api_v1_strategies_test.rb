@@ -91,6 +91,17 @@ class ApiV1StrategiesTest < ActionDispatch::IntegrationTest
     assert_equal "stopped", json.dig("strategy", "status")
   end
 
+  test "an emergency stop is available over the API and reaches the EA payload" do
+    strategy = @user.strategies.create!(VALID)
+    strategy.start!
+
+    post "/api/v1/strategies/#{strategy.id}/emergency_stop", headers: headers
+
+    assert_response :success
+    assert_equal "stopped", json.dig("strategy", "status")
+    assert_equal true, json.dig("strategy", "risk", "emergency_stop")
+  end
+
   test "a running strategy's configuration cannot be changed" do
     strategy = @user.strategies.create!(VALID)
     strategy.start!

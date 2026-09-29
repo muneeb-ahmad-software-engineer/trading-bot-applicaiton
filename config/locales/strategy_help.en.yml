@@ -53,6 +53,17 @@ en:
       The smallest move the stop makes at a time. 10 points = 10 cents. It stops
       the robot from pestering your broker on every tiny price flicker. Leave it
       empty for the default.
+    entry_distance_points: >-
+      Reversal only. While the robot holds no trade it places a Buy Stop this
+      far above the price and a Sell Stop this far below it; whichever the
+      price reaches first becomes the trade and the other is cancelled. 100
+      points = $1. Leave it empty to use the trailing distance.
+    max_daily_loss: >-
+      The most this strategy may lose in one trading day, in your account
+      currency, counting trades already closed today and the ones still open.
+      Example: 50 — when today's result reaches −50, the robot closes its
+      trades and does not open new ones until the next day. Leave empty for no
+      daily limit.
     basket_take_profit: >-
       Close all open trades together once their combined profit reaches this
       many dollars. Example: 20 closes everything at $20 profit. Leave empty for

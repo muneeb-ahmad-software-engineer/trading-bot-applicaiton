@@ -1,4 +1,22 @@
 module StrategiesHelper
+  # What the EA's execution state (mt5/Include/GoldGrid/State.mqh) means, as
+  # [status-indicator state, plain-words label].
+  EXECUTION_STATES = {
+    "INITIALIZING"     => [ :warning, "Starting up — checking the broker" ],
+    "WAITING"          => [ :running, "Flat — waiting for an entry" ],
+    "BUY_ACTIVE"       => [ :live,    "Holding a buy" ],
+    "SELL_ACTIVE"      => [ :live,    "Holding a sell" ],
+    "REVERSAL_PENDING" => [ :warning, "Reversing — confirming the close" ],
+    "CLOSING"          => [ :warning, "Closing — waiting for the broker" ],
+    "OPENING_REVERSE"  => [ :warning, "Reversing — opening the other side" ],
+    "RECOVERY"         => [ :error,   "Recovery — nothing new is opened" ],
+    "GRID"             => [ :running, "Grid — managing baskets" ]
+  }.freeze
+
+  def execution_state_indicator(state)
+    EXECUTION_STATES.fetch(state.to_s) { [ :stopped, state.to_s.humanize ] }
+  end
+
   # An (i) button next to a strategy setting that explains it in plain words.
   #
   # The text lives in config/locales/strategy_help.en.yml so the form and the

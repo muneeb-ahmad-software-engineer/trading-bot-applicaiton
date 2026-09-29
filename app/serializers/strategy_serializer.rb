@@ -14,11 +14,16 @@ class StrategySerializer < ApplicationSerializer
       direction: object.direction,
       grid: grid,
       trailing: trailing,
+      entry: entry,
       basket: basket,
       risk: risk,
       started_at: timestamp(object.started_at),
       stopped_at: timestamp(object.stopped_at),
-      updated_at: timestamp(object.updated_at)
+      updated_at: timestamp(object.updated_at),
+      # Changes whenever the row does, at microsecond precision (updated_at
+      # above is whole seconds). The report response carries the same value;
+      # see Api::V1::Trading::ReportsController.
+      config_version: object.config_version
     }
   end
 
@@ -44,6 +49,13 @@ class StrategySerializer < ApplicationSerializer
     }
   end
 
+  # The flat bracket of a reversal strategy. The effective value is sent — the
+  # trailing distance when the user left it blank — so the EA never has to
+  # guess a default. Null for every other category, which places no bracket.
+  def entry
+    { distance_points: object.effective_entry_distance_points }
+  end
+
   def basket
     {
       take_profit: money(object.basket_take_profit),
@@ -58,6 +70,10 @@ class StrategySerializer < ApplicationSerializer
       max_drawdown_percent: percent(object.max_drawdown_percent),
       min_margin_level_percent: percent(object.min_margin_level_percent),
       max_spread_points: object.max_spread_points,
+      max_daily_loss: money(object.max_daily_loss),
+      # While true the EA closes every position and pending order of this
+      # strategy and opens nothing. Cleared only by starting the strategy.
+      emergency_stop: object.emergency_stopped?,
       maximum_theoretical_lots: lots(object.maximum_theoretical_lots)
     }
   end

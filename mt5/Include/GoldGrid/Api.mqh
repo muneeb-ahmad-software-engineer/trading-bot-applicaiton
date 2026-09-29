@@ -187,9 +187,10 @@ public:
       return API_OK;
      }
 
-   ENUM_API_RESULT   PostReport(const string json_body)
+   //--- `response` carries the platform's reply, which includes the current
+   //--- config_version of the strategy.
+   ENUM_API_RESULT   PostReport(const string json_body, string &response)
      {
-      string response;
       return Request("POST", "/api/v1/trading/report", json_body, response);
      }
 

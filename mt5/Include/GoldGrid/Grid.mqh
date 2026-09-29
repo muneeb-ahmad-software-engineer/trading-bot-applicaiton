@@ -36,7 +36,9 @@ enum ENUM_TRADE_GATE
    GATE_TERMINAL_ALGO_OFF,
    GATE_EA_TRADING_OFF,
    GATE_ACCOUNT_NO_TRADING,
-   GATE_MARKET_CLOSED
+   GATE_MARKET_CLOSED,
+   GATE_EMERGENCY_STOP,
+   GATE_DAILY_LOSS
   };
 
 string TradeGateReason(const ENUM_TRADE_GATE gate)
@@ -61,6 +63,10 @@ string TradeGateReason(const ENUM_TRADE_GATE gate)
                                            "in its properties";
       case GATE_ACCOUNT_NO_TRADING: return "The broker account does not permit expert trading";
       case GATE_MARKET_CLOSED:      return "Market closed for this symbol";
+      case GATE_EMERGENCY_STOP:     return "Emergency stop — everything is being closed; start the strategy "
+                                           "again on the platform to clear it";
+      case GATE_DAILY_LOSS:         return "Daily loss limit reached — nothing opens until the broker's next "
+                                           "trading day";
      }
    return "Unknown";
   }
@@ -87,6 +93,8 @@ private:
    //--- every tick and bury the rest of the log.
    ulong             m_trail_complaint_at;
    int               m_trail_complaint_code;
+   double            m_today_profit;
+   ulong             m_today_at;
 
    bool              IsOurs(void) const
      {
@@ -102,11 +110,11 @@ private:
      {
       //--- Monotonic, for the same reason the report interval is: a throttle
       //--- measured against quote time never expires in a quiet market.
-      if(code == m_trail_complaint_code && GetTickCount64() - m_trail_complaint_at < 60000)
+      if(code == m_trail_complaint_code && ClockMs() - m_trail_complaint_at < 60000)
          return;
 
       m_trail_complaint_code = code;
-      m_trail_complaint_at   = GetTickCount64();
+      m_trail_complaint_at   = ClockMs();
       Print(message);
      }
 
@@ -118,6 +126,8 @@ public:
       m_gate = GATE_OPEN;
       m_trail_complaint_at = 0;
       m_trail_complaint_code = 0;
+      m_today_profit = 0.0;
+      m_today_at = 0;
      }
 
    void              Configure(const long magic, const string symbol, const int slippage_points)
@@ -131,6 +141,11 @@ public:
       m_trade.SetDeviationInPoints(slippage_points);
       m_trade.SetTypeFillingBySymbol(symbol);
       m_trade.SetAsyncMode(false);
+      //--- CTrade echoes every request it sends. Live that is the audit
+      //--- trail; in the Strategy Tester it is thousands of lines a day that
+      //--- bury the ones a run is judged on. Errors are still printed.
+      if(IsTester())
+         m_trade.LogLevel(LOG_LEVEL_ERRORS);
      }
 
    ENUM_TRADE_GATE   Gate(void) const { return m_gate; }
@@ -287,6 +302,8 @@ public:
       m_gate = GATE_OPEN;
 
       if(!config_is_fresh)                       m_gate = GATE_CONFIG_STALE;
+      else if(strategy.emergency_stop)           m_gate = GATE_EMERGENCY_STOP;
+      else if(DailyLossBreached(strategy))       m_gate = GATE_DAILY_LOSS;
       else if(!strategy.IsRunning())             m_gate = GATE_NOT_RUNNING;
       else if(TradingGate() != GATE_OPEN)        m_gate = TradingGate();
       else if(!AccountIsHedging() && strategy.category == CATEGORY_REVERSAL)
@@ -340,7 +357,40 @@ public:
       if(mode != SYMBOL_TRADE_MODE_FULL)
          return GATE_MARKET_CLOSED;
 
+      //--- The trade mode says whether the symbol may be traded at all, not
+      //--- whether its session is open now. Without this the EA sent its
+      //--- bracket every second all weekend and through gold's daily break,
+      //--- and the broker rejected every one with "Market closed" — found by
+      //--- the Strategy Tester, where it filled the log.
+      if(!TradeSessionOpen())
+         return GATE_MARKET_CLOSED;
+
       return GATE_OPEN;
+     }
+
+   //--- Whether the broker's trading session for this symbol is open at the
+   //--- current server time. A broker that publishes no session times at all
+   //--- for any day is treated as always open, rather than never trading.
+   bool              TradeSessionOpen(void) const
+     {
+      MqlDateTime now;
+      TimeToStruct(TimeTradeServer(), now);
+      datetime since_midnight = (datetime)(now.hour * 3600 + now.min * 60 + now.sec);
+
+      datetime from, to;
+      for(uint i = 0; SymbolInfoSessionTrade(m_symbol, (ENUM_DAY_OF_WEEK)now.day_of_week, i, from, to); i++)
+        {
+         //--- A session ending at midnight is reported as 24:00.
+         if(to == 0 || to <= from)
+            to = 86400;
+         if(since_midnight >= from && since_midnight < to)
+            return true;
+        }
+
+      for(int day = 0; day < 7; day++)
+         if(SymbolInfoSessionTrade(m_symbol, (ENUM_DAY_OF_WEEK)day, 0, from, to))
+            return false;   // sessions exist, and none of today's is open
+      return true;          // no session data at all
      }
 
    bool              TradingAllowed(void) const { return TradingGate() == GATE_OPEN; }
@@ -358,6 +408,90 @@ public:
       if(!strategy.has_max_drawdown)
          return false;
       return DrawdownPercent() >= strategy.max_drawdown_percent;
+     }
+
+   //--- The start of the broker's trading day, in server time. TimeCurrent()
+   //--- is the server clock (last quote), which is the clock the broker's day
+   //--- — and its daily statements — run on.
+   static datetime   TradingDayStart(void)
+     {
+      datetime now = TimeCurrent();
+      return now - (now % 86400);
+     }
+
+   //--- Today's result for this EA's positions on this symbol: every deal
+   //--- since the start of the trading day (profit, swap and commission —
+   //--- entry commissions included), plus the floating result of what is still
+   //--- open. What the user sees as "how much has it lost today".
+   double            TodayProfit(void)
+     {
+      //--- Read on every pass and every tick; the day's history does not need
+      //--- re-scanning more than twice a second.
+      if(m_today_at > 0 && ClockMs() - m_today_at < 500)
+         return m_today_profit;
+
+      double total = 0.0;
+
+      if(HistorySelect(TradingDayStart(), TimeCurrent() + 3600))
+        {
+         int deals = HistoryDealsTotal();
+         for(int i = 0; i < deals; i++)
+           {
+            ulong deal = HistoryDealGetTicket(i);
+            if(deal == 0)
+               continue;
+            if(HistoryDealGetInteger(deal, DEAL_MAGIC) != m_magic ||
+               HistoryDealGetString(deal, DEAL_SYMBOL) != m_symbol)
+               continue;
+            total += HistoryDealGetDouble(deal, DEAL_PROFIT)
+                   + HistoryDealGetDouble(deal, DEAL_SWAP)
+                   + HistoryDealGetDouble(deal, DEAL_COMMISSION);
+           }
+        }
+
+      //--- Floating: profit and swap only. Entry commission is already a deal
+      //--- of today (or of an earlier day, where it belongs), so counting
+      //--- PositionCommission here as well would count it twice.
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket == 0 || !PositionSelectByTicket(ticket) || !IsOurs())
+            continue;
+         total += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+        }
+
+      m_today_profit = total;
+      m_today_at     = ClockMs();
+      return total;
+     }
+
+   bool              DailyLossBreached(const SGridStrategy &strategy)
+     {
+      if(!strategy.has_max_daily_loss)
+         return false;
+      return TodayProfit() <= -strategy.max_daily_loss;
+     }
+
+   //--- Closes every position of ours, at market. Returns how many closes
+   //--- FAILED. Used by the risk halts, which want everything gone.
+   int               CloseAllPositions(const string why)
+     {
+      ulong tickets[];
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket == 0 || !PositionSelectByTicket(ticket) || !IsOurs())
+            continue;
+         int n = ArraySize(tickets);
+         ArrayResize(tickets, n + 1);
+         tickets[n] = ticket;
+        }
+
+      int failed = 0;
+      for(int i = 0; i < ArraySize(tickets); i++)
+         if(!ClosePosition(tickets[i], why))
+            failed++;
+      return failed;
      }
 
    bool              MarginTooLow(const SGridStrategy &strategy) const
@@ -408,6 +542,140 @@ public:
                         ticket, m_trade.ResultRetcodeDescription(), m_trade.ResultRetcode());
         }
       return closed;
+     }
+
+   //--- Our one open position: its ticket, with its side in `type`. 0 when
+   //--- flat. With more than one open it returns the first found — callers
+   //--- check TotalPositions() first when that matters.
+   ulong             OurPosition(ENUM_POSITION_TYPE &type) const
+     {
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket == 0 || !PositionSelectByTicket(ticket) || !IsOurs())
+            continue;
+         type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+         return ticket;
+        }
+      return 0;
+     }
+
+   //--- BROKER CONFIRMATION of a close: the position is gone from the open
+   //--- list AND the deal history holds the deal that closed it. Either alone
+   //--- is not enough — the open list can lag a fill, and a history read can
+   //--- lag the list — and a reversal that trusts a guess can end up holding
+   //--- both sides.
+   //--- `ticket` is checked against the open list, `position_id`
+   //--- (POSITION_IDENTIFIER) against the deal history, which is keyed by it.
+   bool              PositionConfirmedClosed(const ulong ticket, const long position_id) const
+     {
+      if(ticket == 0)
+         return true;
+      if(PositionSelectByTicket(ticket))
+         return false;
+      if(!HistorySelectByPosition(position_id > 0 ? position_id : (long)ticket))
+         return false;
+
+      for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+        {
+         ulong deal = HistoryDealGetTicket(i);
+         if(deal == 0)
+            continue;
+         ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal, DEAL_ENTRY);
+         if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY)
+            return true;
+        }
+      return false;
+     }
+
+   //--- How a closed position was closed: the reason, price and side of its
+   //--- last closing deal. False while the history does not yet hold it.
+   bool              ClosingDeal(const ulong ticket, const long position_id, ENUM_DEAL_REASON &reason,
+                                 double &price, ENUM_POSITION_TYPE &closed_side) const
+     {
+      if(ticket == 0 || !HistorySelectByPosition(position_id > 0 ? position_id : (long)ticket))
+         return false;
+
+      for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+        {
+         ulong deal = HistoryDealGetTicket(i);
+         if(deal == 0)
+            continue;
+         ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal, DEAL_ENTRY);
+         if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY)
+            continue;
+
+         reason = (ENUM_DEAL_REASON)HistoryDealGetInteger(deal, DEAL_REASON);
+         price  = HistoryDealGetDouble(deal, DEAL_PRICE);
+         //--- A closing deal trades against the position: a SELL deal closed a buy.
+         closed_side = (ENUM_DEAL_TYPE)HistoryDealGetInteger(deal, DEAL_TYPE) == DEAL_TYPE_SELL
+                       ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
+         return true;
+        }
+      return false;
+     }
+
+   //--- Sends a close and reports whether the broker executed it. Execution is
+   //--- not the same as confirmation: the caller still waits for
+   //--- PositionConfirmedClosed before treating the account as flat.
+   bool              ClosePosition(const ulong ticket, const string why)
+     {
+      if(!PositionSelectByTicket(ticket) || !IsOurs())
+         return false;
+
+      string side = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? "buy" : "sell";
+      if(m_trade.PositionClose(ticket) && m_trade.ResultRetcode() == TRADE_RETCODE_DONE)
+        {
+         PrintFormat("GoldGrid: close of %s #%I64u executed (%s)", side, ticket, why);
+         return true;
+        }
+      PrintFormat("GoldGrid: close of %s #%I64u FAILED (%s) — %s (%d)", side, ticket, why,
+                  m_trade.ResultRetcodeDescription(), m_trade.ResultRetcode());
+      return false;
+     }
+
+   //--- ONE-POSITION ENFORCEMENT for the single-position categories. Closes
+   //--- every position of ours except the most recently opened one, which is
+   //--- the one the strategy most recently decided to hold (a reversal fill,
+   //--- or the side of a bracket that triggered last). Returns how many closes
+   //--- FAILED — non-zero means the account is still over the limit and no new
+   //--- entry may be considered until a later pass gets it back to one.
+   int               CloseAllButNewest(void)
+     {
+      ulong newest_ticket = 0;
+      long  newest_time   = -1;
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket == 0 || !PositionSelectByTicket(ticket) || !IsOurs())
+            continue;
+         long opened = PositionGetInteger(POSITION_TIME_MSC);
+         if(opened > newest_time)
+           {
+            newest_time   = opened;
+            newest_ticket = ticket;
+           }
+        }
+
+      int failed = 0;
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket == 0 || ticket == newest_ticket || !PositionSelectByTicket(ticket) || !IsOurs())
+            continue;
+
+         string side = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? "buy" : "sell";
+         if(m_trade.PositionClose(ticket) && m_trade.ResultRetcode() == TRADE_RETCODE_DONE)
+            PrintFormat("GoldGrid: closed extra %s #%I64u — only one position may be open, keeping #%I64u",
+                        side, ticket, newest_ticket);
+         else
+           {
+            failed++;
+            PrintFormat("GoldGrid: FAILED to close extra %s #%I64u — %s (%d). New entries stay blocked.",
+                        side, ticket, m_trade.ResultRetcodeDescription(), m_trade.ResultRetcode());
+           }
+        }
+      return failed;
      }
 
    //--- MQL5 exposes commission on deals, not on open positions. Summing the
@@ -617,7 +885,9 @@ public:
          if(m_trade.PositionModify(ticket, desired, take))
            {
             moved++;
-            PrintFormat("GoldGrid: trailing stop on #%I64u (%s) moved to %s (%s away from %s)",
+            //--- Live only: a backtest moves stops tens of thousands of times.
+            if(!IsTester())
+               PrintFormat("GoldGrid: trailing stop on #%I64u (%s) moved to %s (%s away from %s)",
                         ticket, type == POSITION_TYPE_BUY ? "buy" : "sell",
                         DoubleToString(desired, digits),
                         DoubleToString(distance, digits),
@@ -686,6 +956,71 @@ public:
    int               DeleteAllPendingStops(void)
      {
       return DeletePendingStops(POSITION_TYPE_BUY) + DeletePendingStops(POSITION_TYPE_SELL);
+     }
+
+   //--- BRACKET HYGIENE. A flat reversal strategy rests exactly one Buy Stop
+   //--- and one Sell Stop. Anything else of ours — a second order on the same
+   //--- side (a retried request that both succeeded, a previous session's
+   //--- leftover) or an order of another type — is deleted, so a single spike
+   //--- can never fill more than one entry per side. Returns how many went.
+   int               DeleteStrayOrders(void)
+     {
+      int  deleted  = 0;
+      bool seen_buy = false, seen_sell = false;
+
+      //--- Tickets first, deletes after: deleting while walking the order list
+      //--- shifts the indices under the loop.
+      ulong doomed[];
+      for(int i = 0; i < OrdersTotal(); i++)
+        {
+         ulong ticket = OrderGetTicket(i);
+         if(ticket == 0 || !OrderSelect(ticket) || !IsOurOrder())
+            continue;
+
+         ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+         bool keep = false;
+         if(type == ORDER_TYPE_BUY_STOP && !seen_buy)        { seen_buy  = true; keep = true; }
+         else if(type == ORDER_TYPE_SELL_STOP && !seen_sell) { seen_sell = true; keep = true; }
+
+         if(!keep)
+           {
+            int n = ArraySize(doomed);
+            ArrayResize(doomed, n + 1);
+            doomed[n] = ticket;
+           }
+        }
+
+      for(int i = 0; i < ArraySize(doomed); i++)
+        {
+         if(m_trade.OrderDelete(doomed[i]))
+           {
+            deleted++;
+            PrintFormat("GoldGrid: deleted stray/duplicate pending order #%I64u", doomed[i]);
+           }
+         else
+            Complain(m_trade.ResultRetcode(),
+                     StringFormat("GoldGrid: could not delete stray pending #%I64u — %s (%d)",
+                                  doomed[i], m_trade.ResultRetcodeDescription(), m_trade.ResultRetcode()));
+        }
+      return deleted;
+     }
+
+   //--- The volume of our resting stop for `side`, or 0 if there is none.
+   double            PendingStopVolume(const ENUM_POSITION_TYPE side) const
+     {
+      ulong ticket = FindPendingStop(side);
+      if(ticket == 0 || !OrderSelect(ticket))
+         return 0.0;
+      return OrderGetDouble(ORDER_VOLUME_CURRENT);
+     }
+
+   //--- The comment of our resting stop for `side`, or "" if there is none.
+   string            PendingStopComment(const ENUM_POSITION_TYPE side) const
+     {
+      ulong ticket = FindPendingStop(side);
+      if(ticket == 0 || !OrderSelect(ticket))
+         return "";
+      return OrderGetString(ORDER_COMMENT);
      }
 
    //--- The stop loss of our position on `side`, or 0 if it has none yet.

@@ -50,6 +50,7 @@ class Event < ApplicationRecord
     when "strategy.updated"     then "Updated strategy #{subject_name}"
     when "strategy.started"     then "Started strategy #{subject_name}"
     when "strategy.stopped"     then "Stopped strategy #{subject_name}"
+    when "strategy.emergency_stopped" then "Emergency-stopped strategy #{subject_name} (close everything)"
     when "strategy.deleted"     then "Deleted strategy #{metadata['name']}"
     when "broker_credential.saved"   then "Saved broker account details"
     when "broker_credential.removed" then "Removed broker account details"

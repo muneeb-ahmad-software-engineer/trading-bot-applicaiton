@@ -49,6 +49,22 @@ class StrategiesTest < ActionDispatch::IntegrationTest
     assert_predicate strategy.reload, :stopped?
   end
 
+  test "an emergency stop stops the strategy, flags it for the EA and is audited" do
+    strategy = create_strategy
+    strategy.start!
+
+    post emergency_stop_strategy_path(strategy)
+
+    assert_redirected_to strategy_path(strategy)
+    strategy.reload
+    assert_predicate strategy, :stopped?
+    assert_predicate strategy, :emergency_stopped?
+    assert Event.exists?(action: "strategy.emergency_stopped", subject: strategy)
+
+    follow_redirect!
+    assert_select ".alert", text: /Emergency stop active/
+  end
+
   test "an unverified user cannot start a strategy" do
     strategy = create_strategy(user: users(:unverified))
     login_as users(:unverified)

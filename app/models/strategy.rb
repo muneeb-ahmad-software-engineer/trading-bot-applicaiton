@@ -99,6 +99,14 @@ class Strategy < ApplicationRecord
             numericality: { only_integer: true, greater_than: 0, less_than_or_equal_to: 100_000 },
             allow_nil: true
 
+  # Reversal only: how far from the market the flat Buy Stop / Sell Stop
+  # bracket rests. Blank means the trailing distance. Ignored by the other
+  # categories rather than refused, so switching category on the form does not
+  # strand the user on an error about a field they can no longer see.
+  validates :entry_distance_points,
+            numericality: { only_integer: true, greater_than: 0, less_than_or_equal_to: 100_000 },
+            allow_nil: true
+
   before_validation :default_the_trailing_step
 
   validate :trailing_settings_need_a_distance
@@ -114,6 +122,10 @@ class Strategy < ApplicationRecord
   validates :max_drawdown_percent, numericality: { greater_than: 0, less_than_or_equal_to: 100 }, allow_nil: true
   validates :min_margin_level_percent, numericality: { greater_than: 0 }, allow_nil: true
   validates :max_spread_points, numericality: { only_integer: true, greater_than: 0 }, allow_nil: true
+  # Realised plus floating loss for the broker's trading day, in account
+  # currency. Enforced by the EA, which closes this strategy's positions when
+  # it is reached and opens nothing more until the next day.
+  validates :max_daily_loss, numericality: { greater_than: 0, less_than_or_equal_to: 10_000_000 }, allow_nil: true
 
   validate :grid_levels_within_max_positions
   validate :exposure_can_accommodate_the_strategy
@@ -140,6 +152,16 @@ class Strategy < ApplicationRecord
   def trailing_activation_price = self.class.points_to_price(trailing_activation_points)
   def trailing_step_price       = self.class.points_to_price(trailing_step_points)
 
+  # The distance the EA actually brackets the market at. Only a reversal
+  # strategy places a bracket, so every other category has none.
+  def effective_entry_distance_points
+    return unless category_reversal?
+
+    entry_distance_points || trailing_stop_points
+  end
+
+  def entry_distance_price = self.class.points_to_price(effective_entry_distance_points)
+
   def start!
     raise NotVerified unless user.may_trade?
     # Starting something already running is not a no-op: it would move
@@ -149,19 +171,38 @@ class Strategy < ApplicationRecord
     # not conflict with itself.
     raise AlreadyRunning if running?
 
-    update!(status: :running, started_at: Time.current, stopped_at: nil)
+    # Starting again is the explicit acknowledgement that ends an emergency
+    # stop. Nothing else clears it.
+    update!(status: :running, started_at: Time.current, stopped_at: nil, emergency_stopped_at: nil)
   rescue ActiveRecord::RecordNotUnique
     # The partial unique index rejected a second concurrent start.
     raise AlreadyRunning
   end
 
   def stop!
-    update!(status: :stopped, stopped_at: Time.current)
+    halt!(stopped_at: Time.current)
   end
 
+  # Stopping, and more: the EA closes every position and pending order of this
+  # strategy and opens nothing until it is started again. Allowed on a strategy
+  # that is already stopped, because that is exactly when a user discovers
+  # positions they want gone.
+  def emergency_stop!
+    now = Time.current
+    halt!(stopped_at: running? ? now : (stopped_at || now), emergency_stopped_at: now)
+  end
+
+  def emergency_stopped? = emergency_stopped_at.present?
+
+  # Identifies this exact configuration. The EA re-fetches when the value in a
+  # report response differs from the one it holds.
+  def config_version = updated_at&.utc&.iso8601(6)
+
   # The number of baskets this strategy can run at once. A both-directions
-  # strategy can hold a buy side and a sell side simultaneously.
-  def concurrent_directions = direction_both? && !category_reversal? ? 2 : 1
+  # grid can hold a buy side and a sell side simultaneously. Trailing and
+  # reversal strategies hold one position in total, whatever the direction —
+  # the EA refuses a second one.
+  def concurrent_directions = direction_both? && category_grid? ? 2 : 1
 
   # Whether the strategy's positions are opened one at a time and exited only
   # by their stop, rather than averaged into a grid.
@@ -170,7 +211,7 @@ class Strategy < ApplicationRecord
   # The largest total volume this configuration could ever open, used to warn a
   # user before their exposure ceiling silently truncates the strategy.
   def maximum_theoretical_lots
-    # A trailing strategy holds one position per direction, and re-enters only
+    # A trailing strategy holds one position at a time, and re-enters only
     # once the previous one has closed. Its ceiling is the entry size itself.
     return (initial_lot.to_d * concurrent_directions).round(2) if single_position?
 
@@ -187,6 +228,16 @@ class Strategy < ApplicationRecord
   class AlreadyRunning < StandardError; end
 
   private
+
+  # Halting writes its columns directly, WITHOUT validations. Stopping must
+  # never be refused because some unrelated setting no longer passes a rule
+  # added after it was saved — a refused stop leaves the EA trading. updated_at
+  # is written with them, so config_version changes and the EA re-fetches.
+  def halt!(**attributes)
+    now = Time.current
+    update_columns(status: "stopped", updated_at: now, **attributes)
+    self
+  end
 
   def default_the_trailing_step
     return if trailing_stop_points.blank? || trailing_step_points.present?

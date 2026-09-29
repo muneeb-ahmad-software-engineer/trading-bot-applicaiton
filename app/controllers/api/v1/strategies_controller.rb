@@ -8,7 +8,7 @@ module Api
     # Starting a strategy is a trading action, so it requires a verified email
     # address. Stopping one never does: a user must always be able to halt.
     class StrategiesController < BaseController
-      before_action :set_strategy, only: %i[show update start stop]
+      before_action :set_strategy, only: %i[show update start stop emergency_stop]
 
       def index
         render json: { strategies: current_user.strategies.ordered.map { StrategySerializer.new(_1).as_json } }
@@ -61,6 +61,17 @@ module Api
         render json: { strategy: StrategySerializer.new(@strategy.reload).as_json }
       end
 
+      def emergency_stop
+        result = ::Strategies::EmergencyStop.call(strategy: @strategy, actor: current_user,
+                                                  source: "api", ip_address: request.remote_ip)
+
+        if result.success?
+          render json: { strategy: StrategySerializer.new(@strategy.reload).as_json }
+        else
+          render_error(result.error_code, result.error_message, :unprocessable_entity)
+        end
+      end
+
       private
 
       # Maps a service error onto the HTTP status a client should branch on.
@@ -91,7 +102,7 @@ module Api
         params.expect(strategy: %i[
           name direction grid_spacing_points grid_levels initial_lot lot_mode
           lot_multiplier basket_take_profit basket_stop_loss max_positions
-          max_exposure_lots max_drawdown_percent min_margin_level_percent max_spread_points
+          max_exposure_lots max_drawdown_percent min_margin_level_percent max_spread_points max_daily_loss
         ])
       end
     end
