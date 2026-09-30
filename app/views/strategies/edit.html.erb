@@ -2,5 +2,13 @@
 <% content_for :head do %><meta name="robots" content="noindex"><% end %>
 
 <%= render layout: "shared/app_shell", locals: { title: "Edit #{@strategy.name}" } do %>
+  <% if @strategy.running? %>
+    <div class="mb-4">
+      <%= render "components/alert", variant: :warning,
+                 title: "This strategy is running",
+                 body: "Changes take effect as soon as your Expert Advisor next reports, normally within seconds, " \
+                       "and apply to the positions already open. The strategy type cannot be changed while it is running." %>
+    </div>
+  <% end %>
   <%= render "strategies/form", strategy: @strategy %>
 <% end %>

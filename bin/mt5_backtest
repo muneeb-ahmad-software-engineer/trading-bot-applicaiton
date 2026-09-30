@@ -9,6 +9,12 @@
 #                                                   # the reversal strategy, one
 #                                                   # calendar month at a time,
 #                                                   # with a table of results
+#   MT5_BACKTEST_MODEL=4 bin/mt5_backtest --pause-app --sweep
+#                                                   # compare trailing distances
+#                                                   # across several weeks
+#   (--sweep reads SWEEP_TRAILING="300 500 1000 …",
+#    SWEEP_WEEKS="2025.07.07-2025.07.12 …" and SWEEP_CATEGORY=reversal|trailing;
+#    defaults below)
 #
 # Scenarios (see scenario_inputs below):
 #   baseline   reversal strategy, no interference
@@ -57,13 +63,22 @@ MODEL="${MT5_BACKTEST_MODEL:-0}"
 
 PAUSE_APP=0
 MONTHLY=0
+SWEEP=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --pause-app) PAUSE_APP=1; shift ;;
     --monthly)   MONTHLY=1; shift ;;
+    --sweep)     SWEEP=1; shift ;;
     *) break ;;
   esac
 done
+
+# Trailing distances (points) and weeks (Monday-Saturday) the sweep compares.
+# The weeks cover a quiet range, choppy weeks, strong rises, strong falls and
+# the most violent weeks in the broker's real-tick history.
+SWEEP_TRAILING="${SWEEP_TRAILING:-300 500 1000 1500 2000}"
+SWEEP_CATEGORY="${SWEEP_CATEGORY:-reversal}"
+SWEEP_WEEKS="${SWEEP_WEEKS:-2025.07.07-2025.07.12 2025.08.18-2025.08.23 2025.09.22-2025.09.27 2025.10.20-2025.10.25 2025.12.08-2025.12.13 2026.01.19-2026.01.24 2026.03.09-2026.03.14 2026.06.15-2026.06.20 2026.09.14-2026.09.19}"
 
 ALL_SCENARIOS=(baseline chaos trailing dailyloss spread)
 if [ "$MONTHLY" = 1 ]; then
@@ -310,8 +325,67 @@ run_monthly() {
   return "$failed"
 }
 
+# One configuration of SWEEP_CATEGORY at a given trailing distance. The step
+# scales with it (5 %), so a wide trail is not modified on every small move.
+sweep_inputs() {
+  local trail="$1" step=$(( $1 / 20 )) category
+  [ "$step" -lt 20 ] && step=20
+  case "$SWEEP_CATEGORY" in
+    reversal) category=2 ;;
+    trailing) category=1 ;;
+    *) echo "SWEEP_CATEGORY must be reversal or trailing, not '$SWEEP_CATEGORY'" >&2; exit 2 ;;
+  esac
+  printf 'InpAllowTrading=true\nInpReentryCooldownSeconds=60\nInpTestLot=0.01\nInpTestCategory=%s\nInpChaosEveryMinutes=0\nInpTestTrailingPoints=%s\nInpTestStepPoints=%s\n' "$category" "$trail" "$step"
+}
+
+run_sweep() {
+  local model_name="generated"; [ "$MODEL" = 4 ] && model_name="realticks"
+  local csv="$RESULTS/sweep-${SWEEP_CATEGORY}-${model_name}-$(date +%Y%m%d-%H%M).csv"
+  local failed=0
+
+  echo "trailing_points,week,gold_change_pct,gold_range,trades,net_profit,profit_factor,win_rate_pct,max_drawdown_pct,max_positions,violations" > "$csv"
+  printf '\n%-8s %-23s %8s %7s %7s %10s %6s %6s %7s %5s\n' trail week "gold%" range trades profit PF "win%" "maxDD%" viol
+  printf '%s\n' "--------------------------------------------------------------------------------------------"
+
+  local trail week from to s
+  for trail in $SWEEP_TRAILING; do
+    sweep_inputs "$trail" | utf16 > "$TERMINAL/MQL5/Profiles/Tester/goldgrid_sweep.set"
+    for week in $SWEEP_WEEKS; do
+      from="${week%-*}"; to="${week#*-}"
+      if run_test "sweep" "$from" "$to"; then
+        s="$SUMMARY"
+        printf '%-8s %-23s %8s %7s %7s %10s %6s %6s %7s %5s\n' "\$$(( trail / 100 ))" "$week" \
+          "$(field "$s" market_change_pct)" "$(field "$s" market_range)" "$(field "$s" trades)" \
+          "$(field "$s" net_profit)" "$(field "$s" profit_factor)" "$(field "$s" win_rate)" \
+          "$(field "$s" max_drawdown_pct)" "$VIOLATIONS"
+        echo "$trail,$week,$(field "$s" market_change_pct),$(field "$s" market_range),$(field "$s" trades),$(field "$s" net_profit),$(field "$s" profit_factor),$(field "$s" win_rate),$(field "$s" max_drawdown_pct),$(field "$s" max_positions),$VIOLATIONS" >> "$csv"
+        [ "$VIOLATIONS" -gt 0 ] && failed=$((failed + 1))
+      else
+        printf '%-8s %-23s  (no result)\n' "\$$(( trail / 100 ))" "$week"
+        failed=$((failed + 1))
+      fi
+    done
+  done
+
+  echo
+  echo "Totals per trailing distance ($(echo $SWEEP_WEEKS | wc -w | tr -d ' ') weeks, 0.01 lot):"
+  printf '  %-8s %10s %8s %14s %6s\n' trail profit trades "winning weeks" viol
+  awk -F, 'NR > 1 { t[$1] += $6; n[$1] += $5; w[$1] += ($6 > 0); c[$1]++; v[$1] += $11 }
+           END { for (k in t) printf "%d  $%-7d %10.2f %8d %9d of %-3d %6d\n", k, k / 100, t[k], n[k], w[k], c[k], v[k] }' "$csv" \
+    | sort -n | cut -d' ' -f2-
+  echo
+  echo "Table saved to ${csv#"$REPO"/}"
+  return "$failed"
+}
+
 prepare
 free_port_3000
+
+if [ "$SWEEP" = 1 ]; then
+  if run_sweep; then echo "Every run completed with no invariant violations."; exit 0; fi
+  echo "Some runs had violations or no result." >&2
+  exit 1
+fi
 
 if [ "$MONTHLY" = 1 ]; then
   if run_monthly; then echo "Every month ran with no invariant violations."; exit 0; fi

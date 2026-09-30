@@ -75,15 +75,21 @@ class StrategiesTest < ActionDispatch::IntegrationTest
     assert_match(/verify your email/i, flash[:alert])
   end
 
-  test "a running strategy cannot be edited or deleted" do
+  test "a running strategy can be edited but not deleted" do
     strategy = create_strategy
     strategy.start!
 
     get edit_strategy_path(strategy)
-    assert_redirected_to strategy
+    assert_response :success
 
-    patch strategy_path(strategy), params: { strategy: { grid_levels: 9 } }
-    assert_equal 5, strategy.reload.grid_levels, "configuration must not change while running"
+    patch strategy_path(strategy), params: { strategy: { grid_levels: 8, max_exposure_lots: 1.0 } }
+    assert_redirected_to strategy
+    assert_equal 8, strategy.reload.grid_levels
+    assert_predicate strategy, :running?
+
+    patch strategy_path(strategy), params: { strategy: { category: "trailing" } }
+    assert_response :unprocessable_entity
+    assert_equal "grid", strategy.reload.category, "the strategy type must not change while running"
 
     assert_no_difference "Strategy.count" do
       delete strategy_path(strategy)

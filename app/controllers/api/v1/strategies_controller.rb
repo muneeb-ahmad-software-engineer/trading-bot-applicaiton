@@ -32,10 +32,6 @@ module Api
       end
 
       def update
-        unless @strategy.editable?
-          return render_error("strategy_running", "Stop the strategy before changing its configuration.", :conflict)
-        end
-
         if @strategy.update(strategy_params)
           render json: { strategy: StrategySerializer.new(@strategy).as_json }
         else

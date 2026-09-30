@@ -71,10 +71,16 @@ void BuildTesterStrategy(SGridStrategy &out, const ENUM_TEST_CATEGORY category, 
 //|                                                                   |
 //| Checks the acceptance criteria of trailing-strategy-refactoring.md|
 //| for a single-position strategy, and counts every breach:          |
-//|   1. never more than one position (so never a buy and a sell)     |
-//|   2. no pending order rests while a position is open (the OCO)    |
+//|   1. never more than one position — except, for a reversal, the   |
+//|      moment its opposite stop fills: one buy and one sell, for at |
+//|      most OVERLAP_ALLOWED_MS, until the old side is closed        |
+//|   2. trailing: no pending order rests beside a position.          |
+//|      reversal: one position always has exactly one stop order,    |
+//|      for the OPPOSITE side, and nothing on its own side           |
 //|   3. never more than one pending stop per side                    |
-//|   4. a position's stop never moves backwards                      |
+//|   4. a stop never moves backwards — a trailing position's stop    |
+//|      loss, or a reversal position's opposite stop order — and a   |
+//|      reversal position never carries a stop loss                  |
 //|                                                                   |
 //| A breach the chaos engine caused on purpose is expected: what is  |
 //| tested is that the EA repairs it within the grace period. A       |
@@ -85,12 +91,14 @@ class CInvariantMonitor
 private:
    long              m_magic;
    string            m_symbol;
+   bool              m_reversal;
 
    ulong             m_injected_at;       // last deliberate breach by the chaos engine
    ulong             m_breach_since;
    bool              m_breach_reported;
    ulong             m_pending_open_since;
    ulong             m_duplicate_since;
+   ulong             m_stop_loss_since;
 
    ulong             m_sl_tickets[];
    double            m_sl_levels[];
@@ -132,6 +140,10 @@ private:
       m_sl_levels[n]  = stop;
      }
 
+   //--- The opposite stop fills, the EA sees the fill and sends the close:
+   //--- normally tens of milliseconds, in the tester less than one tick.
+   static const ulong OVERLAP_ALLOWED_MS;
+
 public:
    int               violations;
    int               max_positions;
@@ -139,6 +151,8 @@ public:
    int               breaches_seen;      // times more than one position was actually open
    int               breaches_repaired;
    int               checks;
+   int               overlaps;           // reversal fills seen with both sides open
+   ulong             max_overlap_ms;     // the longest both sides were open together
 
    //--- What the market did over the run, for comparing periods.
    double            first_bid;
@@ -154,6 +168,10 @@ public:
       m_breach_reported = false;
       m_pending_open_since = 0;
       m_duplicate_since = 0;
+      m_stop_loss_since = 0;
+      m_reversal = false;
+      overlaps = 0;
+      max_overlap_ms = 0;
       violations = 0;
       max_positions = 0;
       breaches_injected = 0;
@@ -166,7 +184,12 @@ public:
       low_bid = 0.0;
      }
 
-   void              Configure(const long magic, const string symbol) { m_magic = magic; m_symbol = symbol; }
+   void              Configure(const long magic, const string symbol, const bool reversal)
+     {
+      m_magic    = magic;
+      m_symbol   = symbol;
+      m_reversal = reversal;
+     }
 
    //--- A breach detected by a check outside this class.
    void              Fail(const string what) { Violation(what); }
@@ -174,7 +197,9 @@ public:
    //--- The chaos engine calls this just before it breaks something on purpose.
    void              ExpectBreach(void) { m_injected_at = ClockMs(); breaches_injected++; }
 
-   void              Check(void)
+   //--- session_open: whether the EA can send anything right now. Orders
+   //--- cannot be placed or moved outside the trading session.
+   void              Check(const bool session_open)
      {
       checks++;
       ulong now = ClockMs();
@@ -189,13 +214,21 @@ public:
          low_bid  = MathMin(low_bid, bid);
         }
 
+      int  buys = 0, sells = 0;
+      bool has_stop_loss = false;
+      ENUM_POSITION_TYPE held = POSITION_TYPE_BUY;
       for(int i = PositionsTotal() - 1; i >= 0; i--)
         {
          ulong ticket = PositionGetTicket(i);
          if(ticket == 0 || !PositionSelectByTicket(ticket) || !Ours())
             continue;
          positions++;
-         CheckStop(ticket, (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE), PositionGetDouble(POSITION_SL));
+         held = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+         if(held == POSITION_TYPE_BUY) buys++; else sells++;
+         if(m_reversal)
+            has_stop_loss = has_stop_loss || PositionGetDouble(POSITION_SL) > 0.0;
+         else
+            CheckStop(ticket, held, PositionGetDouble(POSITION_SL));
         }
       if(positions > max_positions)
          max_positions = positions;
@@ -212,52 +245,105 @@ public:
          if(type == ORDER_TYPE_BUY_STOP)       buy_stops++;
          else if(type == ORDER_TYPE_SELL_STOP) sell_stops++;
          else                                  others++;
+
+         //--- A reversal position's opposite stop trails towards the market
+         //--- only: a sell stop up, a buy stop down. Checked with the same
+         //--- ratchet as a stop loss, keyed by the order's ticket.
+         if(m_reversal && positions == 1)
+           {
+            if(type == ORDER_TYPE_SELL_STOP && held == POSITION_TYPE_BUY)
+               CheckStop(ticket, POSITION_TYPE_BUY, OrderGetDouble(ORDER_PRICE_OPEN));
+            if(type == ORDER_TYPE_BUY_STOP && held == POSITION_TYPE_SELL)
+               CheckStop(ticket, POSITION_TYPE_SELL, OrderGetDouble(ORDER_PRICE_OPEN));
+           }
         }
 
       bool injected_recently = m_injected_at > 0 && now - m_injected_at < 60000;
 
-      //--- 1. One position.
+      //--- 1. One position. A reversal's own fill (one buy, one sell, nothing
+      //--- injected) is the one overlap allowed, and only briefly.
+      bool reversal_overlap = m_reversal && positions == 2 && buys == 1 && sells == 1 && !injected_recently;
       if(positions > 1)
         {
          if(m_breach_since == 0)
            {
             m_breach_since = now;
             m_breach_reported = false;
-            breaches_seen++;
-            if(!injected_recently)
+            if(reversal_overlap)
+               overlaps++;
+            else
+               breaches_seen++;
+            if(!injected_recently && !reversal_overlap)
               {
                Violation(StringFormat("%d positions open, not injected", positions));
                m_breach_reported = true;
               }
            }
-         else if(!m_breach_reported && now - m_breach_since > 60000)
+         if(reversal_overlap && now - m_breach_since > max_overlap_ms)
+            max_overlap_ms = now - m_breach_since;
+         ulong allowed = reversal_overlap ? OVERLAP_ALLOWED_MS : 60000;
+         if(!m_breach_reported && now - m_breach_since > allowed)
            {
-            Violation(StringFormat("injected breach (%d positions) not repaired within 60 s", positions));
+            Violation(reversal_overlap
+                      ? StringFormat("reversal left both sides open for more than %I64u ms", OVERLAP_ALLOWED_MS)
+                      : StringFormat("injected breach (%d positions) not repaired within 60 s", positions));
             m_breach_reported = true;
            }
         }
       else if(m_breach_since > 0)
         {
-         if(!m_breach_reported)
+         if(!m_breach_reported && !reversal_overlap)
             breaches_repaired++;
          m_breach_since = 0;
         }
 
-      //--- 2. Nothing rests while a position is open. A fill and the cancel of
-      //--- its partner are one transaction apart, so a few seconds are allowed.
-      if(positions > 0 && buy_stops + sell_stops + others > 0)
+      //--- 2. What rests beside one open position. A fill and the orders that
+      //--- follow it are a transaction or two apart, so a few seconds are
+      //--- allowed. Outside the trading session nothing can be placed or
+      //--- deleted, so nothing is judged there.
+      bool   wrong = false;
+      string what  = "";
+      if(positions == 1 && m_reversal)
+        {
+         int own      = held == POSITION_TYPE_BUY ? buy_stops : sell_stops;
+         int opposite = held == POSITION_TYPE_BUY ? sell_stops : buy_stops;
+         wrong = opposite != 1 || own > 0 || others > 0;
+         what  = StringFormat("%s open with %d opposite stop(s), %d on its own side, %d other",
+                              held == POSITION_TYPE_BUY ? "BUY" : "SELL", opposite, own, others);
+        }
+      else if(positions > 0 && !m_reversal)
+        {
+         wrong = buy_stops + sell_stops + others > 0;
+         what  = StringFormat("%d pending order(s) resting beside an open position", buy_stops + sell_stops + others);
+        }
+      if(wrong && session_open)
         {
          if(m_pending_open_since == 0)
             m_pending_open_since = now;
          else if(now - m_pending_open_since > 5000)
            {
-            Violation(StringFormat("%d pending order(s) resting beside an open position",
-                                   buy_stops + sell_stops + others));
+            Violation(what);
             m_pending_open_since = 0;
            }
         }
       else
          m_pending_open_since = 0;
+
+      //--- 4b. A reversal position has no stop loss: its exit is the opposite
+      //--- stop order. One opened by an earlier build is given a few seconds
+      //--- to have it removed.
+      if(has_stop_loss)
+        {
+         if(m_stop_loss_since == 0)
+            m_stop_loss_since = now;
+         else if(now - m_stop_loss_since > 5000)
+           {
+            Violation("a reversal position carries a stop loss");
+            m_stop_loss_since = 0;
+           }
+        }
+      else
+         m_stop_loss_since = 0;
 
       //--- 3. One stop per side, nothing else.
       if(buy_stops > 1 || sell_stops > 1 || others > 0)
@@ -275,6 +361,8 @@ public:
          m_duplicate_since = 0;
      }
   };
+
+const ulong CInvariantMonitor::OVERLAP_ALLOWED_MS = 3000;
 
 //+------------------------------------------------------------------+
 //| THE CHAOS ENGINE. On a seeded schedule, one of:                   |

@@ -10,12 +10,12 @@
             class: "btn btn-danger",
             form: { data: { turbo_confirm: "EMERGENCY STOP #{@strategy.name}? The strategy stops AND your Expert Advisor closes every open position and cancels every pending order of this strategy at market. This cannot be undone." } } %>
     <% end %>
+    <%= link_to "Edit", edit_strategy_path(@strategy), class: "btn btn-outline" %>
     <% if @strategy.running? %>
       <%= button_to "Stop strategy", stop_strategy_path(@strategy), method: :post,
             class: "btn btn-danger",
             form: { data: { turbo_confirm: "Stop #{@strategy.name}? No new orders will be placed. Positions already open with your broker are not closed." } } %>
     <% else %>
-      <%= link_to "Edit", edit_strategy_path(@strategy), class: "btn btn-outline" %>
       <%= button_to "Start strategy", start_strategy_path(@strategy), method: :post,
             class: "btn btn-primary",
             form: { data: { turbo_confirm: "Start #{@strategy.name}? Your Expert Advisor will begin placing orders with your broker according to this configuration." } } %>
@@ -53,14 +53,6 @@
                  body: "Your Expert Advisor is closing every position and pending order of this strategy and " \
                        "will open nothing. #{@positions.any? ? "#{pluralize(@positions.size, 'position')} still reported open." : "Nothing is reported open."} " \
                        "Start the strategy again to clear the emergency stop." %>
-    </div>
-  <% end %>
-
-  <% if @strategy.running? %>
-    <div class="mb-4">
-      <%= render "components/alert", variant: :info,
-                 title: "Configuration is locked while running",
-                 body: "Stop the strategy to change its settings. Editing configuration underneath a live basket would change behaviour mid-flight." %>
     </div>
   <% end %>
 
@@ -179,7 +171,7 @@
   </div>
 
   <div class="card mt-4">
-    <div class="card-header"><h2 class="heading-4">Trailing stop</h2></div>
+    <div class="card-header"><h2 class="heading-4"><%= @strategy.category_reversal? ? "Trailing opposite stop" : "Trailing stop" %></h2></div>
     <div class="card-body">
       <% if @strategy.trailing_enabled? %>
         <dl class="space-y-3">
@@ -195,10 +187,19 @@
               ].compact %>
         </dl>
         <p class="caption mt-3">
-          Applied to each position separately, and only ever moved in the favourable
-          direction. A stop is held by your broker, so it survives the terminal being
-          closed — but it is filled at the market price available, which in a gap may be
-          worse than the level shown here.
+          <% if @strategy.category_reversal? %>
+            Trades carry no stop loss. While a buy is open, a Sell Stop follows it this far
+            below the price (a Buy Stop follows a sell this far above), only ever moving
+            towards the price. When it fills, the robot closes the old trade and the new one
+            takes over. The order is held by your broker, so it fills even with the terminal
+            closed — but at the market price available, which in a gap may be worse than
+            the level shown here.
+          <% else %>
+            Applied to each position separately, and only ever moved in the favourable
+            direction. A stop is held by your broker, so it survives the terminal being
+            closed — but it is filled at the market price available, which in a gap may be
+            worse than the level shown here.
+          <% end %>
         </p>
       <% else %>
         <p class="body-sm">

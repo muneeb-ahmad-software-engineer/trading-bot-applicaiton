@@ -353,16 +353,18 @@ class StrategyTest < ActiveSupport::TestCase
     assert_not strategy.running?
   end
 
-  test "only a running strategy is closed for editing" do
+  test "a running strategy can be edited but not change its type" do
     strategy = build
     strategy.save!
-    assert_predicate strategy, :editable?
-
     strategy.start!
-    assert_not strategy.editable?
 
-    strategy.stop!
-    assert_predicate strategy, :editable?
+    assert strategy.update(grid_levels: 6), strategy.errors.full_messages.to_sentence
+    assert_not strategy.update(category: "trailing", trailing_stop_points: 300, trailing_step_points: 50)
+    assert_includes strategy.errors[:category], "cannot change while the strategy is running. Stop it first"
+
+    strategy.reload.stop!
+    assert_predicate strategy, :stopped?
+    assert_not strategy.category_locked?
   end
 
   test "starting requires a verified user" do
@@ -382,12 +384,12 @@ class StrategyTest < ActiveSupport::TestCase
     strategy.start!
     assert_predicate strategy, :running?
     assert_not_nil strategy.started_at
-    assert_not strategy.editable?, "a running strategy must not be editable"
+    assert_predicate strategy, :category_locked?
 
     strategy.stop!
     assert_predicate strategy, :stopped?
     assert_not_nil strategy.stopped_at
-    assert_predicate strategy, :editable?
+    assert_not strategy.category_locked?
   end
 
   test "restarting clears the previous stop so the record is not both started and stopped" do

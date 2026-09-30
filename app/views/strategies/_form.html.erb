@@ -23,16 +23,17 @@
                   [ [ "Grid — add levels as price moves against the basket", "grid" ],
                     [ "Trailing stop — one position per direction, stop follows the price", "trailing" ],
                     [ "Reversal — always in one trade; a trailing opposite order flips it when price turns", "reversal" ] ],
-                  {}, class: "select",
+                  {}, class: "select", disabled: strategy.category_locked?,
                   data: { strategy_category_target: "category", action: "change->strategy-category#apply" },
                   "aria-describedby": "category_hint" %>
             <p class="field-hint" id="category_hint">
               A grid averages into a move. A trailing strategy takes one position and lets
               the stop follow price in the favourable direction only. Both types can use a
               trailing stop; only a grid has levels. A reversal strategy holds one trade at a
-              time with a stop order for the opposite side trailing behind it at the trailing
-              distance. When price turns that far, the trade closes and the opposite one opens
-              in its place. It needs a hedging account, both directions, and no activation.
+              time, with no stop loss: a stop order for the opposite side trails behind it at the
+              trailing distance. When price turns that far, that order fills and the old trade is
+              closed, so the opposite one takes its place. It needs a hedging account, both
+              directions, and no activation.
             </p>
           </div>
 

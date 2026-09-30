@@ -47,19 +47,14 @@ class StrategiesController < ApplicationController
   end
 
   def edit
-    return if @strategy.editable?
-
-    redirect_to @strategy, alert: "Stop the strategy before editing its configuration."
   end
 
   def update
-    return redirect_to(@strategy, alert: "Stop the strategy before editing its configuration.") unless @strategy.editable?
-
     if @strategy.update(strategy_params)
       Event.record("strategy.updated", user: current_user, subject: @strategy,
                    ip_address: request.remote_ip,
                    metadata: { name: @strategy.name, changed: @strategy.previous_changes.keys - %w[updated_at] })
-      redirect_to @strategy, notice: "Strategy updated."
+      redirect_to @strategy, notice: @strategy.running? ? "Strategy updated. Your Expert Advisor picks up the new configuration on its next report." : "Strategy updated."
     else
       render :edit, status: :unprocessable_entity
     end

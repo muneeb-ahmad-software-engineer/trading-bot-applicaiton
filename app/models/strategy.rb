@@ -129,13 +129,15 @@ class Strategy < ApplicationRecord
 
   validate :grid_levels_within_max_positions
   validate :exposure_can_accommodate_the_strategy
+  validate :category_unchanged_while_running
 
   scope :ordered, -> { order(created_at: :desc) }
 
-  # A running strategy's configuration is what the Expert Advisor is acting on.
-  # Editing it underneath a live basket would change behaviour mid-flight, so
-  # the strategy must be stopped first.
-  def editable? = !running?
+  # Configuration may be edited at any time: the EA re-fetches as soon as the
+  # config_version in a report response changes. Only the strategy type is
+  # fixed while running, because switching it would hand the open positions
+  # to logic that never opened them.
+  def category_locked? = running?
 
   # Whether the EA will trail stops for this strategy at all. True for every
   # trailing strategy, and for a grid that opted into the exit.
@@ -328,5 +330,11 @@ class Strategy < ApplicationRecord
     else
       ActiveSupport::NumberHelper.number_to_delimited(total)
     end
+  end
+
+  def category_unchanged_while_running
+    return unless running? && category_changed? && !status_changed?
+
+    errors.add(:category, "cannot change while the strategy is running. Stop it first")
   end
 end

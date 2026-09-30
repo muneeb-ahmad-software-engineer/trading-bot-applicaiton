@@ -43,8 +43,10 @@ en:
       The most profit you are willing to give back, and the most a new trade can
       lose. 100 points = $1 on gold. With 300 points: a buy opened at $4,300
       starts with its stop at $4,297; if gold rises to $4,310 the stop moves up
-      to $4,307. It never moves back. In a reversal strategy this is also how
-      far the price must turn before the robot flips direction.
+      to $4,307. It never moves back. A reversal strategy uses no stop loss:
+      instead a Sell Stop follows a buy this far below the price (a Buy Stop
+      follows a sell this far above), and when the price turns that far the
+      robot flips to the other direction.
     trailing_activation_points: >-
       How much profit a trade must reach before the stop starts following the
       price. 100 points = $1. Leave it empty to start following straight away.

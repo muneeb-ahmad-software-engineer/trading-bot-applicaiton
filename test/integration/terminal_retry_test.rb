@@ -101,6 +101,28 @@ class TerminalRetryTest < ActionDispatch::IntegrationTest
     end
   end
 
+  # Retry needs a running strategy, so starting one has to lift the cap itself,
+  # or a terminal that crash-looped under a stopped strategy is stuck for good.
+  test "starting a strategy lifts a crash-loop cap left over from an earlier one" do
+    with_mt5_sandbox do
+      worker_node
+      broker_credential_for(@user)
+      first = started_strategy
+      instance = @user.mt5_instances.sole
+      Strategies::Stop.call(strategy: first, actor: @user)
+      crash_loop!(instance.reload)
+
+      second = @user.strategies.create!(VALID.merge(name: "XAUUSD grid 2"))
+      result = Strategies::Start.call(strategy: second, actor: @user)
+
+      assert result.success?, result.error_message
+      assert_predicate second.reload, :running?
+      instance.reload
+      assert_predicate instance, :connecting?
+      assert_equal 0, instance.consecutive_failures
+    end
+  end
+
   test "there is nothing to retry without a running strategy" do
     with_mt5_sandbox do
       worker_node

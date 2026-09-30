@@ -6,9 +6,8 @@ module StrategiesHelper
     "WAITING"          => [ :running, "Flat — waiting for an entry" ],
     "BUY_ACTIVE"       => [ :live,    "Holding a buy" ],
     "SELL_ACTIVE"      => [ :live,    "Holding a sell" ],
-    "REVERSAL_PENDING" => [ :warning, "Reversing — confirming the close" ],
+    "REVERSING"        => [ :warning, "Reversing — closing the old side" ],
     "CLOSING"          => [ :warning, "Closing — waiting for the broker" ],
-    "OPENING_REVERSE"  => [ :warning, "Reversing — opening the other side" ],
     "RECOVERY"         => [ :error,   "Recovery — nothing new is opened" ],
     "GRID"             => [ :running, "Grid — managing baskets" ]
   }.freeze

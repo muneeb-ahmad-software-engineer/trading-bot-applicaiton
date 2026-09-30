@@ -9,6 +9,8 @@
 | 5 | Trailing opposite entry + confirmed-close reversal (BUY⇄SELL) | ✅ Done (2026-09-28): compiles, not yet demo-tested |
 | 6 | Risk controls: max daily loss, emergency stop, spread gate on reversal; platform (Rails) fields | ✅ Done (2026-09-28): compiles, Rails green, not yet demo-tested |
 | 7 | Logging pass + test plan (Strategy Tester scenarios, demo run) | ✅ Done (2026-09-29): 5/5 scenarios pass, 21/21 months 0 violations, real-tick check done; pending: demo run (user) |
+| 8 | Real trailing opposite stop, no stop loss (replaces Option A) | ✅ Done (2026-09-30): 5/5 scenarios pass, 0 violations |
+| 9 | Market guard (flat before the break, wait after the real reopen, spread limit) + distance choice on real ticks | ✅ Done (2026-09-30): bad week −$3,242 → −$678 at $3; $15 distance +$287 over 9 real-tick weeks, 7 of 9 up |
 
 ## Phase 1 — Root-cause analysis (done)
 
@@ -46,7 +48,7 @@ The spec asks for a real **Sell Stop** trailing below a BUY, and also for: when 
 - **B: real pending Stop order, and close the old position as soon as the order fills.** This matches the spec's wording, but there is a short overlap on every reversal (and a longer one if the close fails). It also needs a hedging account.
 - **C: netting-account atomic reversal.** One Stop order of double the lot size flips the position in a single broker deal. This only works on netting accounts.
 
-**✅ Decision (2026-09-28): Option A.** The virtual trailing entry level plus a broker-side SL at that level. The opposite side opens at market only after the close is confirmed and zero positions remain. The only real pending orders are the initial bracket (Phase 4), used while flat.
+**Decision (2026-09-28): Option A. ⚠️ Replaced by Option B on 2026-09-30 — see Phase 8.** The virtual trailing entry level plus a broker-side SL at that level. The opposite side opens at market only after the close is confirmed and zero positions remain. The only real pending orders are the initial bracket (Phase 4), used while flat.
 
 ## Phase 2: one-position safety net (done)
 
@@ -332,9 +334,116 @@ Both had 0 violations and never more than 1 position.
 - **The EA re-sent orders every second while the market was closed** (weekends, gold's daily break), and every one was rejected with "Market closed". Fix: `TradingGate()` now checks the broker's trading-session hours (`TradeSessionOpen()`, via `SymbolInfoSessionTrade`), and while the session is closed `ManageBaskets` sends nothing at all (no entries, cancels or closes). The state machine still reconciles, and resting orders and stops stay with the broker.
 - **Test tool:** MT5 cuts back its agent log once it grows large, which made two months come back empty. Each run is now found by its own start line in the log, and the script waits for the tester agent to exit before reading.
 
+### Trailing-distance comparison on REAL ticks, 9 weeks (2026-09-29)
+
+`MT5_BACKTEST_MODEL=4 bin/mt5_backtest --pause-app --sweep`: reversal strategy, 0.01 lot, entry distance = trailing, step = 5 % of the trailing distance. Weeks cover quiet, choppy, trending-up, trending-down and violent markets (Jul 2025 – Sep 2026). Full table: `tmp/mt5-backtest/results/sweep-realticks-20260929-0843.csv`.
+
+| Trailing distance | Total (9 weeks) | Trades | Winning weeks | Violations |
+|---|---|---|---|---|
+| $3 (current) | **−$3,217** | 13,805 | 0 of 9 | 0 |
+| $5 | −$2,014 | 5,492 | 0 of 9 | 0 |
+| **$10** | **−$240** | 1,406 | 4 of 9 | 0 |
+| $15 | −$570 | 675 | 5 of 9 | 0 |
+| $20 | −$636 | 403 | 3 of 9 | 0 |
+
+What it shows:
+- **No trailing distance is profitable overall.** A wider distance cuts the number of flips (and so the spread paid) dramatically: $3 → $10 reduces the loss by over 90 %.
+- **$10 is the least bad**, but it still loses, and 9 weeks is too few to call it an edge. Picking the best of 5 settings on the same 9 weeks invites over-fitting.
+- **At $15–$20 a few bad choppy weeks dominate.** Each losing flip costs more, and the most recent week (14–19 Sep 2026) lost at *every* distance.
+- **Conclusion:** stop-and-reverse on a trailing stop has no edge on its own in XAUUSD. Changing the distance reduces losses but does not create profit. The ideas worth testing next are filters on *when* to reverse (trading hours, max flips per day, volatility-based distance, a pause after each flip), each judged on real ticks and on weeks **not** used to choose it.
+
 ### What these tests do NOT prove
 - **Profitability.** The profit figures come from ticks MetaQuotes *generated* from one-minute bars, on 0.01 lots, with no real requotes, rejections or partial fills. They say nothing about future results.
 - Real broker behaviour. A demo-account run of strategy #4 is still the final check.
+
+## Phase 8: real trailing opposite stop, no stop loss (done, 2026-09-30)
+
+**Why.** Option A showed the user a position with a stop loss and no opposite order, which is not the requested behaviour. Strategy #5 (category `trailing`, 1000 points) also put a $10 stop loss on every 0.01-lot trade and never placed an opposite order, because that category was never built to. The user asked for the spec as written: no stop loss, a real SELL STOP trailing a BUY (and a BUY STOP trailing a SELL), and on its fill close the old side. That is Option B.
+
+**How it works now (reversal category).**
+1. Flat: a Buy Stop and a Sell Stop bracket the market at the entry distance. Neither carries a stop loss. The first fill cancels the other.
+2. BUY open: a SELL STOP rests the trailing distance below the bid and moves only up, in steps of at least `trailing_step_points`. Mirror image for a SELL.
+3. The opposite stop fills: `OnTradeTransaction` runs a full pass at once. `StepState` sees one BUY and one SELL, enters `REVERSING`, and closes the old position. Close requests are retried every 2 s, with `RECOVERY` after 15 s.
+4. The old side is gone: the new position is `*_ACTIVE` and gets its own trailing opposite stop in the same pass.
+5. If reversing isn't allowed when the stop fills (strategy stopped, AllowTrading off, halted, platform unreachable, risk halt), both positions are closed and the strategy goes to `WAITING`. The order still acted as the exit, so stopping a strategy no longer leaves its position unprotected or force-closes it.
+
+**Changes.**
+- `mt5/Include/GoldGrid/Grid.mqh`
+  - New `TrailOppositeStop()`, which ratchets towards the market only, respects the stops/freeze levels and replaces the order on a lot change.
+  - Also new: `RemoveStopLoss()` (takes the SL off positions opened by older builds), `NewestPosition()`, `PendingStopPrice()` and `PendingStopHasStopLoss()`.
+  - `PlacePendingStop()` no longer attaches a stop loss.
+  - `ApplyTrailingStops()` skips the reversal category.
+  - Removed: `ClosingDeal()`, `PositionStop()`, and `MayOpen`'s `replacing_positions`/`replacing_volume` (the RC6 loophole).
+- `mt5/Include/GoldGrid/State.mqh`: `REVERSAL_PENDING` and `OPENING_REVERSE` are replaced by `REVERSING`. The virtual `trail` level is removed.
+- `mt5/GoldGrid.mq5`
+  - Removed: `IsReversalClose`, `TrackReversalLevel`, `ExecuteReversal`, `AbandonReversal`, their retry/abandon timers, and the closing-deal wait in `*_ACTIVE`.
+  - Added: `KeepOppositeStop`, `IsReversalFill`, `BeginReversal`, `ContinueReversal`.
+  - Behaviour changes:
+    - `BeginClose` cancels the opposite stop first.
+    - `RECOVERY` keeps a lone reversal position's opposite stop, its only exit.
+    - A stale bracket also means one carrying a stop loss.
+    - The report's `reversal_level` is now the opposite stop's price.
+    - The tester's configuration never counts as stale.
+  - EA version is now 1.10.
+- `mt5/Include/GoldGrid/Tester.mqh`, invariant monitor:
+  - Allows a reversal's own buy+sell overlap for up to 3 s.
+  - Requires exactly one opposite stop beside a reversal position, and none on its own side.
+  - Checks that the opposite stop never moves backwards and that no reversal position has a stop loss.
+  - The summary adds `reversals_flat` and `max_overlap_ms`.
+- Rails: execution-state labels (`REVERSING`), form hint, help text and the strategy page's "Trailing opposite stop" card.
+- `mt5/README.md`: rewritten reversal section.
+- The Docker terminal template was recompiled with the new EA. The previous build is kept as `GoldGrid.ex5.pre-opposite-stop`.
+
+**Verification.**
+- MetaEditor: 0 errors, 0 warnings. Rails: 605 runs, 0 failures.
+- `bin/mt5_backtest`, 1–26 Sep 2026, generated ticks: all 5 scenarios pass with 0 violations.
+
+| Scenario | Trades | Reversals | Ended flat | Violations | Net |
+|---|---|---|---|---|---|
+| baseline | 5,336 | 5,334 | 0 | 0 | +$2,110 |
+| chaos (1,265 injected failures) | 5,465 | 5,194 | 2 (chaos closed the new side by hand mid-reversal) | 0 | +$1,958 |
+| trailing (category unchanged) | 4,322 | — | — | 0 | −$245 |
+| dailyloss | 2,467 | 2,452 | 2 | 0 | +$1,247 |
+| spread | 5,336 | 5,334 | 0 | 0 | +$2,110 |
+
+**⚠️ Real ticks, 14–19 Sep 2026, 300 points, 0.01 lot: −$3,242 (1,768 trades, max drawdown 32%). The old design lost −$786 in the same week.**
+- 91 trades (5%) lost more than $10 each and made up −$2,450 of it. Almost all of them fell in the **first 10 minutes after the daily reopen (01:00 server time)**, and Monday's reopen alone cost −$1,931.
+- At the reopen the spread is $20–30 and quotes jump $30–50 back and forth. Resting stop orders fill on every flicker. The old design only reacted once per EA pass, which throttled it by accident.
+- Outside those minutes the week lost −$790, about the same as the old design.
+- Fixed in Phase 9.
+
+The generated-tick model is far too kind here. Judge profit only on real ticks.
+
+## Phase 9: market guard and trailing distance (done, 2026-09-30)
+
+The user asked for minimal loss and maximum profit, within the same requirements: no stop loss, a trailing opposite stop, one position.
+
+**The guard** (`GoldGrid.mq5`, reversal only; see "The market guard" in `mt5/README.md`):
+- **Flat before the break.** `InpFlatBeforeBreakMinutes` (5) before the session table's close, the position is closed through `CLOSING` and nothing rests. Nothing is carried into the reopen or over a weekend.
+- **Wait after the real reopen.** No bracket for `InpWaitAfterOpenMinutes` (15) after the **first real price following 10 min without one** (`TrackQuotes`). The session table can't be used for this: this broker's table opens gold at 00:00, but prices start at 01:00. A first version trusted the table, rested a bracket on stale prices at 00:15, and was filled in the 01:00 chaos.
+- **No orders on a price older than 5 min.**
+- **Spread limit.** The strategy's max spread, or a third of the trailing distance (at least 50 points). Above it, no bracket rests, and a filled opposite stop closes both sides instead of flipping.
+- New helper: `CGridEngine::SecondsToSessionClose()`.
+
+**Effect on the bad week, real ticks, 14–19 Sep, $3 distance:**
+- Without the guard: −$3,242, max drawdown 32%.
+- With the session-table version of the guard: −$1,024.
+- With the final version: **−$678, max drawdown 6.8%**, 0 recoveries.
+
+**Trailing distance, real ticks, 0.01 lot, with the guard** (`--sweep`; CSVs `sweep-reversal-realticks-20260930-*.csv`):
+
+| Distance | Weeks A (5) | Weeks B (4, out of sample) | 9-week total | Winning weeks |
+|---|---|---|---|---|
+| $3 | −$1,446 | — | — | 0 of 5 |
+| $5 | −$1,266 | — | — | 0 of 5 |
+| $7.50 | — | −$378 | — | 0 of 4 |
+| $10 | +$405 | +$0 | +$406 | 5 of 9 |
+| **$15** | **+$118** | **+$169** | **+$287** | **7 of 9** |
+| $20 | +$204 | — | — | 3 of 5 |
+
+- Weeks A: 2025.08.18, 2025.10.20, 2026.01.19, 2026.06.15, 2026.09.14. Weeks B: 2025.07.07, 2025.09.22, 2025.12.08, 2026.03.09.
+- **Recommendation: 1500 points ($15).** It wins most weeks and has the smallest bad weeks (worst −$115). Short distances lose every week: gold's normal noise and spread are too big for a $3–7 trail.
+- The edge is small (about $30 a week per 0.01 lot) and nine weeks is not proof. Run it on demo before any real money.
 
 ## Independent code review (2026-09-29)
 

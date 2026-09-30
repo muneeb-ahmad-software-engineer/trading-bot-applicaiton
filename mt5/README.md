@@ -150,14 +150,14 @@ manage it, which is why stopping does not disable exits.
 
 ## The strategy categories
 
-`category` on the strategy decides how positions are **opened**. It does not
-decide how they exit — every category can carry a trailing stop.
+`category` on the strategy decides how positions are **opened** and how they
+exit.
 
 | Category | Opens | Exits with |
 | --- | --- | --- |
 | `grid` | A level at a time, as price moves against the basket | Basket take profit / stop loss, and optionally a trailing stop per position |
 | `trailing` | **One position in total**, at market, and nothing more until it closes | Its trailing stop (mandatory), plus the basket exits if set |
-| `reversal` | **One position in total**. Flat, it brackets the market with a buy stop and a sell stop; after that it flips side each time the trailing stop is hit | Its trailing stop (mandatory), which is also the reversal trigger |
+| `reversal` | **One position in total**. Flat, it brackets the market with a buy stop and a sell stop; after that it flips side each time the trailing opposite stop fills | **No stop loss.** A stop order for the opposite side trails behind the position; when it fills, the old position is closed and the new one takes over |
 
 ### Grid, both directions
 
@@ -170,9 +170,11 @@ independently. Each re-opens once it is flat. The ceilings (`max_positions`,
 
 ### One active position — trailing and reversal
 
-A trailing or reversal strategy holds **zero or one** position. A buy and a
-sell are never open together, whatever the direction setting. This is enforced
-in the EA on every entry path:
+A trailing or reversal strategy holds **zero or one** position, whatever the
+direction setting. The one exception is a reversal's own fill: for the moment
+between the opposite stop filling and the EA closing the old side, both are
+open (see *The reversal* below). This is enforced in the EA on every entry
+path:
 
 1. **Reconciled before every entry.** The broker's actual positions (this
    magic number and symbol only) are counted immediately before an order is
@@ -182,7 +184,8 @@ in the EA on every entry path:
    terminal cannot be mistaken for "flat".
 3. **One-cancels-the-other.** When one side of a reversal bracket fills, the
    other pending order is cancelled straight away from `OnTradeTransaction`.
-   While a position is open, no pending order rests at all.
+   While a position is open, the only order that rests is its trailing
+   opposite stop (reversal) — or nothing at all (trailing).
 4. **Breach repair (RECOVERY).** If more than one position is ever found (a
    spike that fills both bracket sides at once, a restart into an old account
    state), the EA enters `RECOVERY`. It cancels all pending orders and closes
@@ -197,16 +200,17 @@ in the EA on every entry path:
 While flat, a reversal strategy rests **exactly one Buy Stop** the entry
 distance above the ask and **one Sell Stop** the same distance below the bid.
 The entry distance is set on the platform and falls back to the trailing
-distance when left blank. Each order carries its own stop-loss at the trailing
-distance, so the position is protected from its first tick.
+distance when left blank. The orders carry **no stop loss**: the moment one
+fills, its position gets its trailing opposite stop instead.
 
 - The first order to fill becomes the only position, and the other is cancelled
   immediately.
 - Any duplicate order on the same side, or an order of any other type with
   this magic number, is deleted.
 - Each order's comment records its strategy and distance
-  (`GG:<id>:L1:D<points>`). If the distance, strategy or lot size changes, both
-  orders are withdrawn and placed again around the current price.
+  (`GG:<id>:L1:D<points>`). If the distance, strategy or lot size changes, or an
+  order carries a stop loss (placed by an earlier build), both orders are
+  withdrawn and placed again around the current price.
 - An entry distance inside the broker's minimum stop level is widened to the
   nearest accepted distance, and the log says so.
 - While flat, a resting order is never moved, because it may be filling at
@@ -223,56 +227,68 @@ as `GoldGrid: state A -> B (reason)`.
 | `INITIALIZING` | Just started. The EA reads the broker's positions before doing anything. |
 | `WAITING` | Flat. The only state an entry can be placed from. |
 | `BUY_ACTIVE` / `SELL_ACTIVE` | Exactly one position open. |
+| `REVERSING` | The opposite stop filled; the EA is closing the old position. |
 | `CLOSING` | The EA sent a close and is waiting for the broker to confirm it. A close only counts as confirmed when the position has left the open list **and** its closing deal is in the history. If that doesn't happen within 15 s, the state becomes `RECOVERY`. |
-| `RECOVERY` | Something is unexpected or unconfirmed. Nothing is opened. |
-| `REVERSAL_PENDING` | The position's stop (the reversal level) closed it; entries locked until the close is confirmed. |
-| `OPENING_REVERSE` | Close confirmed, account flat, opposite side being opened. |
+| `RECOVERY` | Something is unexpected or unconfirmed. Nothing is opened. A reversal position keeps its opposite stop, its only exit. |
 
 After a restart the EA always starts from `INITIALIZING` and decides from what
 the broker actually holds. The time of the last close is saved in wall-clock
 time, so the re-entry cooldown also holds across a restart.
 
-#### The reversal (confirmed close, then open)
+#### The reversal (trailing opposite stop)
 
-The trailing entry for the opposite side is **virtual**. Its level is the open
-position's own broker-side stop, which trails in the favourable direction only
-and never moves back.
+A reversal position has **no stop loss**. Its exit is a real stop order for the
+opposite side, held by the broker, which trails behind price and only ever
+moves towards it. Gold at $2,000, a 300-point ($3) distance:
 
-1. **BUY open.** Its stop trails up behind price. The log shows
-   `reversal level — SELL opens if price reaches X` each time it moves.
-2. **Price turns by the trailing distance.** The **broker** closes the BUY at
-   its stop. This happens even if the terminal is offline.
-3. **`REVERSAL_PENDING`.** Entries are locked. The EA waits until the broker
-   confirms the BUY is closed (gone from the open list *and* its closing deal
-   is in the history) and checks that zero positions are open.
-4. **`OPENING_REVERSE`.** The EA opens the SELL at market, with its stop
-   attached in the same request, after the full risk gate (spread included).
-5. **`SELL_ACTIVE`.** Mirror image: its stop trails down, and a BUY opens if
-   price reaches it.
+1. **BUY opens at 2000.** A **SELL STOP** is placed at 1997.
+2. **Price rises to 2010.** The SELL STOP moves up to 2007 (in steps of at
+   least `step_points`). It never moves down.
+3. **Price falls to 2007.** The SELL STOP fills — the broker does this, even
+   with the terminal offline. For a moment the account holds the BUY and the
+   new SELL.
+4. **`REVERSING`.** The EA sees the fill (`OnTradeTransaction`) and closes the
+   BUY at once. Close requests are retried every 2 s.
+5. **`SELL_ACTIVE`.** A **BUY STOP** is placed 300 points above the ask and
+   trails down. When it fills, the SELL is closed and the cycle repeats.
 
-A buy and a sell are never open together, because the new side's order doesn't
-exist until the old side is confirmed closed. While the terminal is offline,
-the worst case is ending up flat.
+The log shows each step: `the BUY reverses to SELL if price reaches X`,
+`state BUY_ACTIVE -> REVERSING (SELL stop filled — closing BUY #…)`,
+`state REVERSING -> SELL_ACTIVE (reversal complete — …)`.
 
-When it does **not** reverse:
-- **Not a stop-loss close.** Take profit, manual close, stop-out or a basket
-  exit sends the strategy back to `WAITING`, with the cooldown and then a new
-  bracket.
-- **Trading not allowed.** Strategy stopped, `AllowTrading` off, or the EA
-  halted: back to `WAITING`.
-- **Close not confirmed within 15 s.** The state becomes `RECOVERY` and nothing
-  is opened.
-- **Opposite order can't be sent within 30 s** (spread too wide, market closed)
-  or is rejected 3 times: the reversal is abandoned and the strategy returns to
-  `WAITING`.
-- **Order accepted but no position appears within 10 s.** The state becomes
-  `RECOVERY`. The order is never sent twice.
-- **Terminal restarted in the middle of a reversal.** The EA re-reads the
-  broker from `INITIALIZING`. If it is flat, it waits out the cooldown and
-  brackets again rather than reversing late.
+- **Terminal offline when the stop fills.** Both positions stay open. They are
+  the same size in opposite directions, so the loss stops growing until the EA
+  is back and closes the old one.
+- **Reversing not allowed at that moment** (strategy stopped, `AllowTrading`
+  off, EA halted, platform unreachable, risk halt): both positions are closed
+  and the strategy lands in `WAITING`. The order still did its job as the
+  position's exit. Stopping a strategy therefore does not close its position:
+  the opposite stop keeps trailing and closes it when price turns.
+- **The old side cannot be closed within 15 s.** The state becomes `RECOVERY`,
+  which closes every position except the newest.
+- **Any other close** (take profit, manual close, stop-out, basket exit) is not
+  a reversal: the opposite stop is cancelled and the strategy goes back to
+  `WAITING`, with the cooldown and then a new bracket.
+- **A position with a stop loss from an earlier build** has it removed once
+  its opposite stop is in place.
+- A stop order fills at the price available. In a gap it fills beyond its
+  level, like a stop loss would.
 
-A gap fills the stop beyond its level. The log reports the slippage in points
-on every reversal.
+#### The market guard (reversal)
+
+Tested on the broker's real ticks, most of a week's loss came from the first
+minutes after gold reopens each day. The spread is then $20–30 and quotes jump
+$30–50 back and forth, and a resting stop order fills on every jump. The guard
+keeps the strategy out of those minutes:
+
+| Rule | Default | What happens |
+| --- | --- | --- |
+| Flat before the break | `InpFlatBeforeBreakMinutes` = 5 | This long before the daily or weekend break (from the broker's session table), the position is closed and nothing is left resting. Nothing is carried into the reopen or over a weekend gap. |
+| Wait after the reopen | `InpWaitAfterOpenMinutes` = 15 | No new bracket until this long after the **first real price** following 10 minutes without one. The session table's opening time isn't used: this broker's table opens gold at 00:00, but the first price arrives at 01:00. |
+| No stale prices | 5 min | Nothing is placed on a price older than this. |
+| Spread limit | the strategy's *maximum spread*, or a third of the trailing distance (at least 50 points) | While the spread is wider, no bracket rests. If the opposite stop fills in a wide spread, the EA doesn't flip: it closes both sides and brackets again once the spread is back to normal. |
+
+Setting a minutes input to 0 turns that rule off.
 
 #### Trailing category, both directions
 
@@ -298,8 +314,9 @@ risk gates only refuse new entries; these close positions too:
   position that was already near the limit at midnight can trip the halt soon
   after the new day starts. That is deliberately conservative, since the loss
   is real either way.
-- While a halt is in force a reversal does **not** happen. The strategy lands
-  in `WAITING` and the gate keeps it there.
+- While a halt is in force a reversal does **not** happen. The position and
+  its opposite stop are closed, the strategy lands in `WAITING`, and the gate
+  keeps it there.
 - A single position is closed through `CLOSING`, so the broker confirms the
   close like any other. Failed closes are retried every 5 s.
 - With `InpAllowTrading` off, a halt only reports. Nothing is sent, closes
@@ -314,12 +331,13 @@ default 10 s).
 ### What the dashboard shows
 
 Each report carries an `execution` block: the state-machine state and why it
-was entered, the reversal level, today's P/L, and any risk halt in force. The
+was entered, the reversal level (the price of the opposite stop), today's P/L,
+and any risk halt in force. The
 strategy page shows these in a **Robot state** card. A grid reports `GRID`.
 
 ---
 
-## How the trailing stop works
+## How the trailing stop works (grid and trailing)
 
 Worked through with a $2 loss margin — `trailing.stop_points` of 200, since a
 point on XAUUSD is `0.01` — on a buy opened at $345:
@@ -401,7 +419,7 @@ summary.
 | `chaos` | Reversal, with a failure injected every ~20 simulated minutes |
 | `trailing` | Trailing category, both directions, with chaos |
 | `dailyloss` | Reversal with a $15 daily loss limit |
-| `spread` | Reversal with a 25-point spread limit, so reversals must wait or be abandoned |
+| `spread` | Reversal with a 25-point spread limit (it gates the bracket's market checks, not the stop orders) |
 
 **Tester mode.** The tester can't reach the platform (`WebRequest` is
 unavailable there), so the strategy is built from the *Strategy Tester only*
@@ -411,11 +429,15 @@ live. Otherwise a 3-second lock would span hours of simulated market.
 
 **The invariant monitor** (`Include/GoldGrid/Tester.mqh`) checks the
 following on every tick and prints `INVARIANT VIOLATION` for each breach:
-1. Never more than one position.
-2. No pending order resting beside an open position (5 s grace for the
-   OCO cancel).
+1. Never more than one position — except a reversal's own fill (one buy and
+   one sell), which must be resolved within 3 s.
+2. Trailing: no pending order beside an open position. Reversal: an open
+   position always has exactly one stop order, on the opposite side, and none
+   on its own side (5 s grace, trading session only).
 3. At most one stop per side, and no other order types.
-4. A position's stop never moves backwards.
+4. A stop never moves backwards: a trailing position's stop loss, or a
+   reversal position's opposite stop order. A reversal position never carries
+   a stop loss.
 5. A manual close is never treated as a reversal.
 
 **The chaos engine** injects, on a seeded schedule:
@@ -427,7 +449,7 @@ following on every tick and prints `INVARIANT VIOLATION` for each breach:
 - a tick storm (the same tick handled 25 times)
 
 Each run ends with one line:
-`TEST SUMMARY | violations=… | max_positions=… | reversals=… | recoveries=… | chaos=… | net_profit=… | profit_factor=… | win_rate=… | max_drawdown_pct=… | market_change_pct=… | market_range=… | …`.
+`TEST SUMMARY | violations=… | max_positions=… | reversals=… | reversals_flat=… | max_overlap_ms=… | recoveries=… | chaos=… | net_profit=… | profit_factor=… | win_rate=… | max_drawdown_pct=… | market_change_pct=… | market_range=… | …`.
 
 **Month by month (`--monthly`).** This runs the reversal strategy separately
 for each calendar month (the broker's XAUUSD history starts on 23 Dec 2024).

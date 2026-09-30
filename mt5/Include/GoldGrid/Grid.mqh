@@ -281,22 +281,16 @@ public:
    //| Every configured limit is checked here, and this runs before   |
    //| every single order. The platform does not enforce any of this. |
    //+---------------------------------------------------------------+
-   //--- replacing_positions / replacing_volume: what the order will close as it
-   //--- opens. A reversal order swaps one position for another, so the position
-   //--- it replaces does not count against the ceilings it is checked against.
-   //---
    //--- resting_order: the question is whether a stop order may rest, not
    //--- whether to fill at market now. The spread limit does not apply to that.
    //--- It keeps a market order from filling at a bad price NOW; a stop order
    //--- fills later, at its trigger, and today's spread says nothing about that.
    //--- Applying it anyway was worse than useless: spreads widen exactly when
-   //--- price moves fast, so a one-second spike cancelled the reversal order in
-   //--- the moments its stop was most likely to be hit — closing the position
-   //--- without opening its replacement. Observed on the demo account, as the
-   //--- whole bracket cancelled and re-placed on a single tick.
+   //--- price moves fast, so a one-second spike cancelled the bracket in the
+   //--- moments it was most likely to be hit. Observed on the demo account, as
+   //--- the whole bracket cancelled and re-placed on a single tick.
    bool              MayOpen(const SGridStrategy &strategy, const bool config_is_fresh,
                              const double next_lot, const ENUM_POSITION_TYPE type, string &reason,
-                             const int replacing_positions = 0, const double replacing_volume = 0.0,
                              const bool resting_order = false)
      {
       m_gate = GATE_OPEN;
@@ -311,9 +305,9 @@ public:
       else if(OppositeWouldNet(type))            m_gate = GATE_NETTING_OPPOSITE;
       else if(!resting_order && SpreadTooWide(strategy))
                                                  m_gate = GATE_SPREAD_TOO_WIDE;
-      else if(TotalPositions() - replacing_positions >= strategy.max_positions)
+      else if(TotalPositions() >= strategy.max_positions)
                                                  m_gate = GATE_MAX_POSITIONS;
-      else if(TotalVolume() - replacing_volume + next_lot > strategy.max_exposure_lots + 0.0000001)
+      else if(TotalVolume() + next_lot > strategy.max_exposure_lots + 0.0000001)
                                                  m_gate = GATE_MAX_EXPOSURE;
       else if(DrawdownBreached(strategy))        m_gate = GATE_DRAWDOWN;
       else if(MarginTooLow(strategy))            m_gate = GATE_MARGIN_LEVEL;
@@ -391,6 +385,47 @@ public:
          if(SymbolInfoSessionTrade(m_symbol, (ENUM_DAY_OF_WEEK)day, 0, from, to))
             return false;   // sessions exist, and none of today's is open
       return true;          // no session data at all
+     }
+
+   //--- Seconds until the current trading session closes, in server time. A
+   //--- session that runs on into the next day's without a break reads as
+   //--- INT_MAX. False outside every session, or when the broker publishes none.
+   //---
+   //--- Only the END is taken from the session table. Its start is not to be
+   //--- trusted: this broker's table opens gold at 00:00, while the first real
+   //--- price arrives at 01:00 (see QUOTE_GAP_SECONDS in GoldGrid.mq5).
+   bool              SecondsToSessionClose(int &until_close) const
+     {
+      MqlDateTime now;
+      TimeToStruct(TimeTradeServer(), now);
+      int t = now.hour * 3600 + now.min * 60 + now.sec;
+      ENUM_DAY_OF_WEEK today    = (ENUM_DAY_OF_WEEK)now.day_of_week;
+      ENUM_DAY_OF_WEEK tomorrow = (ENUM_DAY_OF_WEEK)((now.day_of_week + 1) % 7);
+
+      datetime from, to;
+      for(uint i = 0; SymbolInfoSessionTrade(m_symbol, today, i, from, to); i++)
+        {
+         int start = (int)from, end = (int)to;
+         if(end == 0 || end <= start)
+            end = 86400;   // a session ending at midnight is reported as 24:00
+         if(t < start || t >= end)
+            continue;
+
+         until_close = end - t;
+         if(end == 86400 && SessionStartsAtMidnight(tomorrow))
+            until_close = INT_MAX;
+         return true;
+        }
+      return false;
+     }
+
+   bool              SessionStartsAtMidnight(const ENUM_DAY_OF_WEEK day) const
+     {
+      datetime from, to;
+      for(uint i = 0; SymbolInfoSessionTrade(m_symbol, day, i, from, to); i++)
+         if((int)from == 0)
+            return true;
+      return false;
      }
 
    bool              TradingAllowed(void) const { return TradingGate() == GATE_OPEN; }
@@ -588,33 +623,6 @@ public:
       return false;
      }
 
-   //--- How a closed position was closed: the reason, price and side of its
-   //--- last closing deal. False while the history does not yet hold it.
-   bool              ClosingDeal(const ulong ticket, const long position_id, ENUM_DEAL_REASON &reason,
-                                 double &price, ENUM_POSITION_TYPE &closed_side) const
-     {
-      if(ticket == 0 || !HistorySelectByPosition(position_id > 0 ? position_id : (long)ticket))
-         return false;
-
-      for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
-        {
-         ulong deal = HistoryDealGetTicket(i);
-         if(deal == 0)
-            continue;
-         ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal, DEAL_ENTRY);
-         if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY)
-            continue;
-
-         reason = (ENUM_DEAL_REASON)HistoryDealGetInteger(deal, DEAL_REASON);
-         price  = HistoryDealGetDouble(deal, DEAL_PRICE);
-         //--- A closing deal trades against the position: a SELL deal closed a buy.
-         closed_side = (ENUM_DEAL_TYPE)HistoryDealGetInteger(deal, DEAL_TYPE) == DEAL_TYPE_SELL
-                       ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
-         return true;
-        }
-      return false;
-     }
-
    //--- Sends a close and reports whether the broker executed it. Execution is
    //--- not the same as confirmation: the caller still waits for
    //--- PositionConfirmedClosed before treating the account as flat.
@@ -725,6 +733,11 @@ public:
    int               ApplyTrailingStops(const SGridStrategy &strategy)
      {
       if(!strategy.has_trailing || strategy.trailing_stop_points <= 0)
+         return 0;
+
+      //--- A reversal position carries no stop loss at all: its exit is the
+      //--- opposite stop order that TrailOppositeStop keeps behind it.
+      if(strategy.category == CATEGORY_REVERSAL)
          return 0;
 
       //--- Nothing can be modified while the terminal or the account refuses
@@ -1023,30 +1036,32 @@ public:
       return OrderGetString(ORDER_COMMENT);
      }
 
-   //--- The stop loss of our position on `side`, or 0 if it has none yet.
-   double            PositionStop(const ENUM_POSITION_TYPE side) const
+   //--- The price of our resting stop for `side`, or 0 if there is none.
+   double            PendingStopPrice(const ENUM_POSITION_TYPE side) const
      {
-      for(int i = PositionsTotal() - 1; i >= 0; i--)
-        {
-         ulong ticket = PositionGetTicket(i);
-         if(ticket == 0 || !PositionSelectByTicket(ticket))
-            continue;
-         if(IsOurs() && (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == side)
-            return PositionGetDouble(POSITION_SL);
-        }
-      return 0.0;
+      ulong ticket = FindPendingStop(side);
+      if(ticket == 0 || !OrderSelect(ticket))
+         return 0.0;
+      return OrderGetDouble(ORDER_PRICE_OPEN);
+     }
+
+   //--- Whether our resting stop for `side` carries a stop loss of its own.
+   //--- Bracket orders placed by builds before the trailing opposite stop did.
+   bool              PendingStopHasStopLoss(const ENUM_POSITION_TYPE side) const
+     {
+      ulong ticket = FindPendingStop(side);
+      return ticket != 0 && OrderSelect(ticket) && OrderGetDouble(ORDER_SL) > 0.0;
      }
 
    //--- Makes sure exactly one stop order that would open `side` rests at
-   //--- `price`, carrying its own stop `stop_points` beyond the entry — so the
-   //--- position it opens is protected from its first tick, by the broker,
-   //--- whether or not this EA is running when it fills.
+   //--- `price`, with no stop loss: in a reversal strategy the position it
+   //--- opens is protected by the opposite stop order instead.
    //---
    //--- Moves an existing order rather than replacing it, so there is never a
    //--- moment with no order in place. Returns true if an order now rests at
    //--- the price.
    bool              PlacePendingStop(const ENUM_POSITION_TYPE side, const double lot, const double price,
-                                      const int stop_points, const string comment)
+                                      const string comment)
      {
       double point  = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
       int    digits = (int)SymbolInfoInteger(m_symbol, SYMBOL_DIGITS);
@@ -1054,30 +1069,20 @@ public:
          return false;
 
       double stops_level = (double)SymbolInfoInteger(m_symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
-      double distance    = MathMax(stop_points * point, stops_level);
       double entry       = NormalizeDouble(price, digits);
-      double stop        = NormalizeDouble(side == POSITION_TYPE_BUY ? entry - distance : entry + distance, digits);
 
       ulong existing = FindPendingStop(side);
       if(existing != 0 && OrderSelect(existing))
         {
          bool same_price  = MathAbs(OrderGetDouble(ORDER_PRICE_OPEN) - entry) < point / 2.0;
-         bool same_stop   = MathAbs(OrderGetDouble(ORDER_SL) - stop) < point / 2.0;
+         bool no_stop     = OrderGetDouble(ORDER_SL) <= 0.0;
          bool same_volume = MathAbs(OrderGetDouble(ORDER_VOLUME_CURRENT) - lot) < 0.000001;
 
-         if(same_price && same_stop && same_volume)
+         if(same_price && no_stop && same_volume)
             return true;
 
          if(same_volume)
-           {
-            if(m_trade.OrderModify(existing, entry, stop, 0.0, ORDER_TIME_GTC, 0))
-               return true;
-            Complain(m_trade.ResultRetcode(),
-                     StringFormat("GoldGrid: could not move pending #%I64u to %s — %s (%d)",
-                                  existing, DoubleToString(entry, digits),
-                                  m_trade.ResultRetcodeDescription(), m_trade.ResultRetcode()));
-            return false;
-           }
+            return ModifyPendingStop(existing, entry);
 
          //--- A volume cannot be modified; the lot size was changed on the
          //--- platform. Replace it.
@@ -1093,18 +1098,164 @@ public:
       if(side == POSITION_TYPE_SELL && entry > bid - stops_level) return false;
 
       bool ok = (side == POSITION_TYPE_BUY)
-                ? m_trade.BuyStop(lot, entry, m_symbol, stop, 0.0, ORDER_TIME_GTC, 0, comment)
-                : m_trade.SellStop(lot, entry, m_symbol, stop, 0.0, ORDER_TIME_GTC, 0, comment);
+                ? m_trade.BuyStop(lot, entry, m_symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, comment)
+                : m_trade.SellStop(lot, entry, m_symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, comment);
       if(ok)
-         PrintFormat("GoldGrid: placed %s stop, %.2f lots at %s, its stop at %s",
-                     side == POSITION_TYPE_BUY ? "BUY" : "SELL", lot,
-                     DoubleToString(entry, digits), DoubleToString(stop, digits));
+         PrintFormat("GoldGrid: placed %s stop, %.2f lots at %s", side == POSITION_TYPE_BUY ? "BUY" : "SELL",
+                     lot, DoubleToString(entry, digits));
       else
          Complain(m_trade.ResultRetcode(),
                   StringFormat("GoldGrid: %s stop at %s rejected — %s (%d)",
                                side == POSITION_TYPE_BUY ? "buy" : "sell", DoubleToString(entry, digits),
                                m_trade.ResultRetcodeDescription(), m_trade.ResultRetcode()));
       return ok;
+     }
+
+   //--- Moves a resting stop order to `entry` and strips any stop loss it
+   //--- carries.
+   bool              ModifyPendingStop(const ulong ticket, const double entry)
+     {
+      if(m_trade.OrderModify(ticket, entry, 0.0, 0.0, ORDER_TIME_GTC, 0))
+         return true;
+      Complain(m_trade.ResultRetcode(),
+               StringFormat("GoldGrid: could not move pending #%I64u to %s — %s (%d)",
+                            ticket, DoubleToString(entry, (int)SymbolInfoInteger(m_symbol, SYMBOL_DIGITS)),
+                            m_trade.ResultRetcodeDescription(), m_trade.ResultRetcode()));
+      return false;
+     }
+
+   //+---------------------------------------------------------------+
+   //| THE TRAILING OPPOSITE STOP (reversal strategy).                |
+   //|                                                                |
+   //| While a BUY is open, one SELL STOP rests the trailing distance |
+   //| below the bid, and only ever moves UP as price rises. While a  |
+   //| SELL is open, one BUY STOP rests the trailing distance above   |
+   //| the ask, and only ever moves DOWN. Gold at $2,000, a buy, a    |
+   //| 300-point ($3) distance:                                       |
+   //|                                                                |
+   //|   buy opens at 2000  ->  sell stop placed at 1997              |
+   //|   price reaches 2010 ->  sell stop moved  to 2007              |
+   //|   price falls to 2008 -> sell stop stays  at 2007              |
+   //|   price falls to 2007 -> sell stop fills: the reversal         |
+   //|                                                                |
+   //| The order is held by the broker, so it still fills with this   |
+   //| terminal offline. `held` is the side of the open position; the |
+   //| order is for the other side. Returns true if the order rests   |
+   //| where it belongs after this call.                              |
+   //+---------------------------------------------------------------+
+   bool              TrailOppositeStop(const SGridStrategy &strategy, const ENUM_POSITION_TYPE held,
+                                       const double lot, const string comment)
+     {
+      if(strategy.trailing_stop_points <= 0 || TradingGate() != GATE_OPEN)
+         return false;
+
+      double point  = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+      int    digits = (int)SymbolInfoInteger(m_symbol, SYMBOL_DIGITS);
+      double bid    = SymbolInfoDouble(m_symbol, SYMBOL_BID);
+      double ask    = SymbolInfoDouble(m_symbol, SYMBOL_ASK);
+      if(point <= 0.0 || bid <= 0.0 || ask <= 0.0)
+         return false;
+
+      //--- The broker refuses a stop order closer to the market than this. A
+      //--- tighter distance is widened to the closest accepted one, and the
+      //--- user is told, because it is no longer the distance they configured.
+      double minimum  = (double)SymbolInfoInteger(m_symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+      double freeze   = (double)SymbolInfoInteger(m_symbol, SYMBOL_TRADE_FREEZE_LEVEL) * point;
+      double distance = strategy.trailing_stop_points * point;
+      double step     = MathMax(strategy.trailing_step_points, 1) * point;
+      if(distance <= minimum)
+        {
+         Complain(0, StringFormat("GoldGrid: trailing distance of %d points is inside the broker's minimum "
+                                  "stop distance of %d points — trailing at the broker's minimum instead.",
+                                  strategy.trailing_stop_points,
+                                  (int)SymbolInfoInteger(m_symbol, SYMBOL_TRADE_STOPS_LEVEL)));
+         distance = minimum + point;
+        }
+
+      //--- A sell stop is triggered by the bid, a buy stop by the ask.
+      ENUM_POSITION_TYPE opposite = (held == POSITION_TYPE_BUY) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+      double trigger = (opposite == POSITION_TYPE_SELL) ? bid : ask;
+      double desired = NormalizeDouble(opposite == POSITION_TYPE_SELL ? bid - distance : ask + distance, digits);
+
+      ulong existing = FindPendingStop(opposite);
+      if(existing != 0 && OrderSelect(existing) &&
+         MathAbs(OrderGetDouble(ORDER_VOLUME_CURRENT) - lot) < 0.000001)
+        {
+         double current = OrderGetDouble(ORDER_PRICE_OPEN);
+
+         //--- THE RATCHET. Only ever towards the market, and only once the
+         //--- improvement is worth a round trip to the broker. A stop order
+         //--- that could move away would let the position lose more than the
+         //--- trailing distance the user agreed to.
+         bool improves = (opposite == POSITION_TYPE_SELL) ? desired - current >= step
+                                                          : current - desired >= step;
+         bool has_stop = OrderGetDouble(ORDER_SL) > 0.0;
+         if(!improves && !has_stop)
+            return true;
+         if(!improves)
+            desired = current;
+
+         //--- Inside the freeze distance the broker rejects any modification.
+         //--- The order stays where it is — it is about to fill anyway.
+         if(freeze > 0.0 && MathAbs(trigger - current) < freeze)
+            return true;
+
+         if(!ModifyPendingStop(existing, desired))
+            return false;
+         if(!IsTester() && improves)
+            PrintFormat("GoldGrid: %s stop moved to %s (%s behind %s)",
+                        opposite == POSITION_TYPE_SELL ? "sell" : "buy", DoubleToString(desired, digits),
+                        DoubleToString(distance, digits), DoubleToString(trigger, digits));
+         return true;
+        }
+
+      //--- None yet (a new position), or the lot size changed: a fresh order
+      //--- at the trailing distance from the market.
+      if(!PlacePendingStop(opposite, lot, desired, comment))
+         return false;
+      PrintFormat("GoldGrid: the %s reverses to %s if price reaches %s",
+                  held == POSITION_TYPE_BUY ? "BUY" : "SELL", opposite == POSITION_TYPE_SELL ? "SELL" : "BUY",
+                  DoubleToString(desired, digits));
+      return true;
+     }
+
+   //--- Takes the stop loss off a position. A reversal position opened by an
+   //--- earlier build carries one; its exit is now the opposite stop order,
+   //--- so the stop loss would only close it without reversing.
+   bool              RemoveStopLoss(const ulong ticket)
+     {
+      if(!PositionSelectByTicket(ticket) || PositionGetDouble(POSITION_SL) <= 0.0)
+         return true;
+      if(m_trade.PositionModify(ticket, 0.0, PositionGetDouble(POSITION_TP)))
+        {
+         PrintFormat("GoldGrid: removed the stop loss from #%I64u — the opposite stop order is its exit", ticket);
+         return true;
+        }
+      Complain(m_trade.ResultRetcode(),
+               StringFormat("GoldGrid: could not remove the stop loss from #%I64u — %s (%d)",
+                            ticket, m_trade.ResultRetcodeDescription(), m_trade.ResultRetcode()));
+      return false;
+     }
+
+   //--- Our most recently opened position, with its side in `type`. 0 when flat.
+   ulong             NewestPosition(ENUM_POSITION_TYPE &type) const
+     {
+      ulong newest = 0;
+      long  newest_time = -1;
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket == 0 || !PositionSelectByTicket(ticket) || !IsOurs())
+            continue;
+         long opened = PositionGetInteger(POSITION_TIME_MSC);
+         if(opened > newest_time)
+           {
+            newest_time = opened;
+            newest      = ticket;
+            type        = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+           }
+        }
+      return newest;
      }
 
    //--- stop_points > 0 attaches a stop that far from the entry in the same

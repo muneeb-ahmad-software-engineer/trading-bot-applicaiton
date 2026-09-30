@@ -102,15 +102,14 @@ class ApiV1StrategiesTest < ActionDispatch::IntegrationTest
     assert_equal true, json.dig("strategy", "risk", "emergency_stop")
   end
 
-  test "a running strategy's configuration cannot be changed" do
+  test "a running strategy's configuration can be changed" do
     strategy = @user.strategies.create!(VALID)
     strategy.start!
 
-    patch "/api/v1/strategies/#{strategy.id}", params: { strategy: { grid_levels: 9 } }, headers: headers, as: :json
-
-    assert_response :conflict
-    assert_equal "strategy_running", json.dig("error", "code")
-    assert_equal 5, strategy.reload.grid_levels
+    patch "/api/v1/strategies/#{strategy.id}", params: { strategy: { grid_levels: 8, max_exposure_lots: 1.0 } }, headers: headers, as: :json
+    assert_response :success
+    assert_equal 8, strategy.reload.grid_levels
+    assert_predicate strategy, :running?
   end
 
   test "an unverified user cannot start a strategy but can always stop one" do

@@ -63,6 +63,12 @@ module Strategies
       reconfigured = Mt5::Reconfigure.call(instance:, strategy:, actor:, source:)
       return reconfigured if reconfigured.failure?
 
+      # A user starting a strategy is asking for the terminal again, the same
+      # signal the Retry button gives. Without this, failures left over from an
+      # earlier strategy block every start, and Retry needs a running strategy,
+      # so nothing could ever lift the crash-loop cap.
+      reconfigured.payload.clear_failures! if reconfigured.payload.crash_looping?
+
       Mt5::Start.call(instance: reconfigured.payload, actor:, source:)
     end
 
