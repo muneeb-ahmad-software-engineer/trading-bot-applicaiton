@@ -273,7 +273,7 @@ module Mt5
         FileUtils.mkdir_p(File.dirname(target), mode: DIR_MODE)
 
         if File.directory?(source)
-          FileUtils.ln_s(source, target, force: true)
+          link_directory(source, target)
         else
           begin
             FileUtils.ln(source, target, force: true)
@@ -291,6 +291,29 @@ module Mt5
             FileUtils.cp(source, target, preserve: true)
           end
         end
+      end
+
+      # A directory link, made so that doing it again changes nothing.
+      #
+      # NOT `FileUtils.ln_s(source, target, force: true)`: when the target is
+      # already a link to a directory, ln_s follows it and creates the new link
+      # INSIDE that directory — inside the shared template. Every re-preparation
+      # of an instance did that, leaving MQL5/Experts/Experts -> MQL5/Experts
+      # (and the same in Include, Scripts, ... and Sounds). A self-link is an
+      # endless tree: at start-up MetaTrader walked Experts\Experts\Experts\...
+      # compiling, and the terminal never got as far as loading the EA, so it
+      # sat in "connecting" or died.
+      def link_directory(source, target)
+        if File.symlink?(target)
+          return if File.readlink(target) == source
+
+          File.unlink(target)
+        elsif File.exist?(target)
+          # A real directory where the shared one belongs (MetaTrader recreated
+          # it, or a tree from an older layout): set aside, never deleted.
+          File.rename(target, "#{target}.replaced-#{Time.current.utc.strftime('%Y%m%d%H%M%S')}")
+        end
+        File.symlink(source, target)
       end
 
       # ------------------------------------------------------------ Launching

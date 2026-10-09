@@ -22,7 +22,9 @@ enum ENUM_TEST_CATEGORY { TEST_GRID, TEST_TRAILING, TEST_REVERSAL };
 void BuildTesterStrategy(SGridStrategy &out, const ENUM_TEST_CATEGORY category, const double lot,
                          const int trailing_points, const int step_points, const int entry_points,
                          const int max_spread_points, const double max_daily_loss,
-                         const int grid_spacing_points, const int grid_levels)
+                         const int grid_spacing_points, const int grid_buy_orders,
+                         const int grid_sell_orders, const double grid_target_money,
+                         const int grid_pause_seconds)
   {
    out.loaded   = true;
    out.id       = 0;
@@ -33,25 +35,27 @@ void BuildTesterStrategy(SGridStrategy &out, const ENUM_TEST_CATEGORY category, 
                 : category == TEST_TRAILING ? CATEGORY_TRAILING : CATEGORY_REVERSAL;
    out.direction = GRID_BOTH;
 
-   out.grid_spacing_points = grid_spacing_points;
-   out.grid_levels         = category == TEST_GRID ? grid_levels : 0;
-   out.initial_lot         = lot;
-   out.lot_mode            = LOT_FIXED;
-   out.lot_multiplier      = 1.0;
+   bool grid = category == TEST_GRID;
+   out.grid_spacing_points      = grid_spacing_points;
+   out.grid_buy_orders          = grid ? grid_buy_orders : 0;
+   out.grid_sell_orders         = grid ? grid_sell_orders : 0;
+   out.grid_cycle_pause_seconds = grid ? grid_pause_seconds : 0;
+   out.initial_lot              = lot;
 
-   out.has_trailing               = trailing_points > 0;
-   out.trailing_stop_points       = trailing_points;
+   out.has_trailing               = !grid && trailing_points > 0;
+   out.trailing_stop_points       = grid ? 0 : trailing_points;
    out.has_trailing_activation    = false;
    out.trailing_activation_points = 0;
    out.trailing_step_points       = MathMax(1, MathMin(step_points, trailing_points));
    out.entry_distance_points      = entry_points > 0 ? entry_points : trailing_points;
 
-   out.has_basket_take_profit = false;
-   out.basket_take_profit     = 0.0;
+   out.has_basket_take_profit = grid;
+   out.basket_take_profit     = grid ? grid_target_money : 0.0;
    out.has_basket_stop_loss   = false;
    out.basket_stop_loss       = 0.0;
 
-   out.max_positions        = category == TEST_GRID ? MathMax(grid_levels * 2, 1) : 1;
+   //--- A grid may hold its whole ladder; the single-position categories one.
+   out.max_positions        = grid ? MathMax(out.LadderSize(), 1) : 1;
    out.max_exposure_lots    = 1000.0;
    out.has_max_drawdown     = false;
    out.max_drawdown_percent = 0.0;
@@ -99,6 +103,12 @@ private:
    ulong             m_pending_open_since;
    ulong             m_duplicate_since;
    ulong             m_stop_loss_since;
+   int               m_last_cycle;        // grid: the highest cycle number seen
+   int               m_fills_cycle;       // grid: the cycle the fill keys below belong to
+   string            m_fills;             // grid: "|comment|" of every rung filled this cycle
+   string            m_last_cycle_state;  // grid: the state at the previous check
+   datetime          m_pause_until_seen;  // grid: the pause deadline the cycle held while in COOLDOWN
+   ulong             m_foreign_since;     // grid: an order from another cycle has rested since
 
    ulong             m_sl_tickets[];
    double            m_sl_levels[];
@@ -169,6 +179,12 @@ public:
       m_pending_open_since = 0;
       m_duplicate_since = 0;
       m_stop_loss_since = 0;
+      m_last_cycle = 0;
+      m_fills_cycle = 0;
+      m_fills = "";
+      m_last_cycle_state = "";
+      m_pause_until_seen = 0;
+      m_foreign_since = 0;
       m_reversal = false;
       overlaps = 0;
       max_overlap_ms = 0;
@@ -197,14 +213,11 @@ public:
    //--- The chaos engine calls this just before it breaks something on purpose.
    void              ExpectBreach(void) { m_injected_at = ClockMs(); breaches_injected++; }
 
-   //--- session_open: whether the EA can send anything right now. Orders
-   //--- cannot be placed or moved outside the trading session.
-   void              Check(const bool session_open)
+   //--- The market's path over the run, for the summary. Check() calls this;
+   //--- the grid, which has no single-position invariants, calls it alone.
+   void              Track(void)
      {
       checks++;
-      ulong now = ClockMs();
-      int   positions = 0;
-
       double bid = SymbolInfoDouble(m_symbol, SYMBOL_BID);
       if(bid > 0.0)
         {
@@ -213,9 +226,200 @@ public:
          high_bid = MathMax(high_bid, bid);
          low_bid  = MathMin(low_bid, bid);
         }
+     }
+
+   //--- 7. A rung never fills twice in one cycle (D6). Called from the fill
+   //--- transaction with the deal's side and comment, which together name
+   //--- the rung (the buy and the sell rung of one level share a comment),
+   //--- and the order it filled: one order filling in several partial deals
+   //--- is one fill; a second ORDER for the same rung is the breach.
+   void              NoteGridFill(const int cycle, const ENUM_DEAL_TYPE side, const string comment, const ulong order)
+     {
+      if(cycle <= 0 || LevelFromComment(comment) <= 0)
+         return;
+      if(side != DEAL_TYPE_BUY && side != DEAL_TYPE_SELL)
+         return;
+      if(cycle != m_fills_cycle)
+        {
+         m_fills_cycle = cycle;
+         m_fills = "";
+        }
+      string rung = StringFormat("|%s %s@", side == DEAL_TYPE_BUY ? "BUY" : "SELL", comment);
+      string key  = StringFormat("%s%I64u|", rung, order);
+      if(StringFind(m_fills, key) >= 0)
+         return;                                   // another part of the same fill
+      if(StringFind(m_fills, rung) >= 0)
+         Violation(StringFormat("rung %s %s filled twice in cycle %d (orders differ)",
+                                side == DEAL_TYPE_BUY ? "BUY" : "SELL", comment, cycle));
+      m_fills += key;
+     }
+
+   //--- THE GRID'S INVARIANTS (grid-strategy-plan.md Phases 5 and 8):
+   //---   1. no two orders of ours of the same type at the same price — a
+   //---      rung placed twice would fill twice (a chaos-injected stray is
+   //---      allowed 5 s to be cleaned up);
+   //---   2. the cycle number only ever grows, and by one at a time;
+   //---   3. never more filled rungs + resting orders than max_positions;
+   //---   4. no resting order from a cycle other than the current one for
+   //---      more than 5 s;
+   //---   5. the moment CLOSING gives way to COOLDOWN, no rung of the cycle
+   //---      just closed is open or resting;
+   //---   6. COOLDOWN is not left before the pause deadline the cycle set.
+   //--- `state` is the cycle state's name; `placing` whether it may place;
+   //--- `pause_until` the cycle's pause deadline (0 outside a pause).
+   //--- Checks run on ticks, so a transition is seen at the first tick
+   //--- after it; checks 5 and 6 are written so that a late sighting cannot
+   //--- fire falsely (they compare against what the cycle recorded, not
+   //--- against when the monitor happened to look).
+   void              CheckGrid(const int cycle, const string state, const bool placing,
+                               const int max_allowed, const int pause_seconds, const long strategy_id,
+                               const datetime pause_until)
+     {
+      Track();
+      ulong now = ClockMs();
+
+      //--- Positions: all of ours for the statistic, those that are rungs of
+      //--- this cycle for the ceiling. The chaos engine's injected position
+      //--- carries no rung comment and stays in the basket until the target,
+      //--- which is what a user's stray trade would do; the ceiling is a
+      //--- promise about what the EA places, so it is measured on rungs.
+      int positions = 0, rungs = 0, previous_rungs = 0;
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket == 0 || !PositionSelectByTicket(ticket) || !Ours())
+            continue;
+         positions++;
+         int c = CycleFromComment(PositionGetString(POSITION_COMMENT));
+         if(c == cycle)
+            rungs++;
+         if(c > 0 && c < cycle)
+            previous_rungs++;
+        }
+      max_positions = MathMax(max_positions, positions);
+
+      //--- Our orders: price and type for the duplicate check, the comment's
+      //--- cycle for the foreign-cycle check.
+      double prices[];
+      int    types[];
+      bool   foreign = false;
+      for(int i = OrdersTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = OrderGetTicket(i);
+         if(ticket == 0 || !OrderSelect(ticket))
+            continue;
+         if(OrderGetInteger(ORDER_MAGIC) != m_magic || OrderGetString(ORDER_SYMBOL) != m_symbol)
+            continue;
+         int n = ArraySize(prices);
+         ArrayResize(prices, n + 1);
+         ArrayResize(types, n + 1);
+         prices[n] = OrderGetDouble(ORDER_PRICE_OPEN);
+         types[n]  = (int)OrderGetInteger(ORDER_TYPE);
+         string comment = OrderGetString(ORDER_COMMENT);
+         int    c = CycleFromComment(comment);
+         if(c != cycle || StrategyIdFromComment(comment) != strategy_id)
+            foreign = true;
+         if(c > 0 && c < cycle)
+            previous_rungs++;
+        }
+      int orders = ArraySize(prices);
+
+      //--- 3. The ceiling: rungs filled plus rungs resting, with 5 s for the
+      //--- lists to settle after a send.
+      if(rungs + orders > max_allowed)
+        {
+         if(m_breach_since == 0)
+            m_breach_since = now;
+         else if(now - m_breach_since > 5000 && !m_breach_reported)
+           {
+            Violation(StringFormat("%d filled rung(s) + %d resting order(s) exceed the maximum of %d",
+                                   rungs, orders, max_allowed));
+            m_breach_reported = true;
+           }
+        }
+      else
+        {
+         m_breach_since = 0;
+         m_breach_reported = false;
+        }
+
+      //--- 4. An order from another cycle, or another strategy's id.
+      if(foreign && orders > 0)
+        {
+         if(m_foreign_since == 0)
+            m_foreign_since = now;
+         else if(now - m_foreign_since > 5000)
+           {
+            Violation(StringFormat("a resting order of ours does not belong to cycle %d", cycle));
+            m_foreign_since = 0;
+           }
+        }
+      else
+         m_foreign_since = 0;
+
+      //--- 5 and 6. Transitions. The cycle number has already advanced when
+      //--- COOLDOWN is seen, so what must be gone is anything carrying an
+      //--- EARLIER cycle's comment (a position the chaos engine injected
+      //--- meanwhile carries none and is not the close's failure).
+      if(state == "COOLDOWN" && pause_until > 0)
+         m_pause_until_seen = pause_until;
+      if(state != m_last_cycle_state)
+        {
+         if(m_last_cycle_state == "CLOSING" && state == "COOLDOWN" && previous_rungs > 0)
+            Violation(StringFormat("CLOSING ended with %d rung(s) of the closed cycle still on the broker",
+                                   previous_rungs));
+         if(m_last_cycle_state == "COOLDOWN" && state == "PLACING")
+           {
+            if(m_pause_until_seen == 0 && pause_seconds > 0)
+               Violation("COOLDOWN was entered without a pause deadline");
+            else if(m_pause_until_seen > 0 && TimeGMT() < m_pause_until_seen - 1)
+               Violation(StringFormat("COOLDOWN left %d s before its deadline",
+                                      (int)(m_pause_until_seen - TimeGMT())));
+            m_pause_until_seen = 0;
+           }
+         m_last_cycle_state = state;
+        }
+      string duplicate = "";
+      for(int a = 0; a < ArraySize(prices) && duplicate == ""; a++)
+         for(int b = a + 1; b < ArraySize(prices); b++)
+            if(types[a] == types[b] && MathAbs(prices[a] - prices[b]) < _Point / 2.0)
+              {
+               duplicate = StringFormat("two %s orders at %s", types[a] == ORDER_TYPE_BUY_STOP ? "buy stop" : "sell stop",
+                                        DoubleToString(prices[a], _Digits));
+               break;
+              }
+      if(duplicate != "")
+        {
+         if(m_duplicate_since == 0)
+            m_duplicate_since = now;
+         else if(now - m_duplicate_since > 5000)
+           {
+            Violation(StringFormat("duplicate ladder rung — %s (cycle %d, %s)", duplicate, cycle,
+                                   placing ? "placing" : "not placing"));
+            m_duplicate_since = 0;
+           }
+        }
+      else
+         m_duplicate_since = 0;
+
+      //--- The cycle counter.
+      if(m_last_cycle > 0 && cycle < m_last_cycle)
+         Violation(StringFormat("cycle number went backwards, %d -> %d", m_last_cycle, cycle));
+      else if(m_last_cycle > 0 && cycle > m_last_cycle + 1)
+         Violation(StringFormat("cycle number jumped, %d -> %d", m_last_cycle, cycle));
+      m_last_cycle = MathMax(m_last_cycle, cycle);
+     }
+
+   //--- session_open: whether the EA can send anything right now. Orders
+   //--- cannot be placed or moved outside the trading session.
+   void              Check(const bool session_open)
+     {
+      Track();
+      ulong now = ClockMs();
+      int   positions = 0;
 
       int  buys = 0, sells = 0;
-      bool has_stop_loss = false;
+      bool missing_stop_loss = false;
       ENUM_POSITION_TYPE held = POSITION_TYPE_BUY;
       for(int i = PositionsTotal() - 1; i >= 0; i--)
         {
@@ -225,10 +429,11 @@ public:
          positions++;
          held = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
          if(held == POSITION_TYPE_BUY) buys++; else sells++;
+         //--- A position shares its ticket with the order that opened it, so
+         //--- its stop loss is tracked under a key of its own.
          if(m_reversal)
-            has_stop_loss = has_stop_loss || PositionGetDouble(POSITION_SL) > 0.0;
-         else
-            CheckStop(ticket, held, PositionGetDouble(POSITION_SL));
+            missing_stop_loss = missing_stop_loss || PositionGetDouble(POSITION_SL) <= 0.0;
+         CheckStop(ticket * 2 + 1, held, PositionGetDouble(POSITION_SL));
         }
       if(positions > max_positions)
          max_positions = positions;
@@ -252,9 +457,9 @@ public:
          if(m_reversal && positions == 1)
            {
             if(type == ORDER_TYPE_SELL_STOP && held == POSITION_TYPE_BUY)
-               CheckStop(ticket, POSITION_TYPE_BUY, OrderGetDouble(ORDER_PRICE_OPEN));
+               CheckStop(ticket * 2, POSITION_TYPE_BUY, OrderGetDouble(ORDER_PRICE_OPEN));
             if(type == ORDER_TYPE_BUY_STOP && held == POSITION_TYPE_SELL)
-               CheckStop(ticket, POSITION_TYPE_SELL, OrderGetDouble(ORDER_PRICE_OPEN));
+               CheckStop(ticket * 2, POSITION_TYPE_SELL, OrderGetDouble(ORDER_PRICE_OPEN));
            }
         }
 
@@ -329,16 +534,16 @@ public:
       else
          m_pending_open_since = 0;
 
-      //--- 4b. A reversal position has no stop loss: its exit is the opposite
-      //--- stop order. One opened by an earlier build is given a few seconds
-      //--- to have it removed.
-      if(has_stop_loss)
+      //--- 4b. A reversal position carries a stop loss — the broker-held half
+      //--- of its exit. It opens with one attached; a few seconds are allowed
+      //--- for one that could not be set at once.
+      if(missing_stop_loss && session_open)
         {
          if(m_stop_loss_since == 0)
             m_stop_loss_since = now;
          else if(now - m_stop_loss_since > 5000)
            {
-            Violation("a reversal position carries a stop loss");
+            Violation("a reversal position has no stop loss");
             m_stop_loss_since = 0;
            }
         }
@@ -397,6 +602,7 @@ private:
    long              m_magic;
    string            m_symbol;
    int               m_every_seconds;
+   bool              m_restart_only;      // inject restarts and nothing else
    datetime          m_next_at;
 
    ulong             OurPosition(ENUM_POSITION_TYPE &type) const
@@ -427,11 +633,13 @@ public:
       ArrayInitialize(counts, 0);
      }
 
-   void              Configure(const long magic, const string symbol, const int every_minutes, const int seed)
+   void              Configure(const long magic, const string symbol, const int every_minutes, const int seed,
+                               const bool restart_only = false)
      {
       m_magic  = magic;
       m_symbol = symbol;
       m_every_seconds = every_minutes * 60;
+      m_restart_only  = restart_only;
       m_trade.SetExpertMagicNumber((ulong)magic);
       m_trade.SetTypeFillingBySymbol(symbol);
       MathSrand(seed);
@@ -463,7 +671,7 @@ public:
       //--- Jittered, so events do not always land on the same phase of a trade.
       m_next_at = now + m_every_seconds / 2 + MathRand() % MathMax(m_every_seconds, 1);
 
-      ENUM_CHAOS_EVENT event = (ENUM_CHAOS_EVENT)(1 + MathRand() % 5);
+      ENUM_CHAOS_EVENT event = m_restart_only ? CHAOS_RESTART : (ENUM_CHAOS_EVENT)(1 + MathRand() % 5);
       ENUM_POSITION_TYPE type = POSITION_TYPE_BUY;
       ulong ticket = OurPosition(type);
       double ask = SymbolInfoDouble(m_symbol, SYMBOL_ASK);

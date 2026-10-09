@@ -8,8 +8,8 @@ class TerminalRetryTest < ActionDispatch::IntegrationTest
 
   VALID = {
     name: "XAUUSD grid", direction: "both",
-    grid_spacing_points: 150, grid_levels: 5,
-    initial_lot: 0.01, lot_mode: "fixed",
+    grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5, basket_take_profit: 2,
+    initial_lot: 0.01,
     max_positions: 10, max_exposure_lots: 0.5
   }.freeze
 

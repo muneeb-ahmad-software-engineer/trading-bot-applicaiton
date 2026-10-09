@@ -16,12 +16,11 @@
 #include "Clock.mqh"
 
 enum ENUM_GRID_DIRECTION { GRID_BOTH, GRID_BUY_ONLY, GRID_SELL_ONLY };
-enum ENUM_LOT_MODE       { LOT_FIXED, LOT_MULTIPLIER };
 
-//--- What the strategy does with the market. A grid averages into a move by
-//--- adding levels; a trailing strategy holds one position per direction and
-//--- manages it with its stop. Both may carry a trailing stop — the category
-//--- decides how positions are OPENED, not how they are exited.
+//--- What the strategy does with the market. A grid rests a ladder of stop
+//--- orders on both sides of the market and closes everything that filled on
+//--- one combined profit target (being rebuilt — grid-strategy-plan.md). A
+//--- trailing strategy holds one position and manages it with its stop.
 //---
 //--- A reversal strategy is always on exactly one side. The position's stop and
 //--- a stop order for the opposite side sit at the same price and trail
@@ -39,11 +38,16 @@ struct SGridStrategy
 
    ENUM_STRATEGY_CATEGORY category;
    ENUM_GRID_DIRECTION direction;
+   //--- Grid: a ladder of resting stop orders. Buy Stops rest above the
+   //--- market and Sell Stops below it, each one `grid_spacing_points` further
+   //--- out than the last. Everything that fills is closed together when the
+   //--- combined profit reaches basket_take_profit; the ladder is then
+   //--- re-placed after grid_cycle_pause_seconds.
    int                grid_spacing_points;
-   int                grid_levels;
-   double             initial_lot;
-   ENUM_LOT_MODE      lot_mode;
-   double             lot_multiplier;
+   int                grid_buy_orders;
+   int                grid_sell_orders;
+   int                grid_cycle_pause_seconds;
+   double             initial_lot;           // the lot of every order
 
    //--- Trailing stop. The distance is the loss margin the user accepts giving
    //--- back from the best price the position has seen.
@@ -90,12 +94,8 @@ struct SGridStrategy
 
    bool               IsRunning(void) const { return status == "running"; }
 
-   //--- How many positions one direction may hold. A trailing strategy takes a
-   //--- single position and rides it; it does not average in.
-   int                LevelsPerDirection(void) const
-     {
-      return category == CATEGORY_GRID ? grid_levels : 1;
-     }
+   //--- How many orders one grid cycle places in total.
+   int                LadderSize(void) const { return grid_buy_orders + grid_sell_orders; }
   };
 
 //+------------------------------------------------------------------+
@@ -146,19 +146,14 @@ bool ParseStrategy(CJsonNode *root, SGridStrategy &out, string &error)
       return false;
      }
 
-   //--- Spacing and levels are null for a trailing strategy. They are read the
-   //--- same way regardless and land as zero, which the category-aware checks
-   //--- below then either demand or ignore.
-   out.grid_spacing_points = JsonPath(grid, "spacing_points") != NULL ? grid.Get("spacing_points").AsInt(0) : 0;
-   out.grid_levels         = grid.Get("levels")      != NULL ? grid.Get("levels").AsInt(0)        : 0;
-   out.initial_lot         = grid.Get("initial_lot") != NULL ? grid.Get("initial_lot").AsDouble(0) : 0.0;
-
-   string lot_mode = grid.Get("lot_mode") != NULL ? grid.Get("lot_mode").AsString("fixed") : "fixed";
-   out.lot_mode = (lot_mode == "multiplier") ? LOT_MULTIPLIER : LOT_FIXED;
-
-   CJsonNode *multiplier = grid.Get("lot_multiplier");
-   out.lot_multiplier = (CheckPointer(multiplier) != POINTER_INVALID && !multiplier.IsNull())
-                        ? multiplier.AsDouble(1.0) : 1.0;
+   //--- The grid keys are null for a trailing or reversal strategy. They are
+   //--- read the same way regardless and land as zero, which the
+   //--- category-aware checks below then either demand or ignore.
+   out.grid_spacing_points      = grid.Get("spacing_points")      != NULL ? grid.Get("spacing_points").AsInt(0)      : 0;
+   out.grid_buy_orders          = grid.Get("buy_stop_orders")     != NULL ? grid.Get("buy_stop_orders").AsInt(0)     : 0;
+   out.grid_sell_orders         = grid.Get("sell_stop_orders")    != NULL ? grid.Get("sell_stop_orders").AsInt(0)    : 0;
+   out.grid_cycle_pause_seconds = grid.Get("cycle_pause_seconds") != NULL ? grid.Get("cycle_pause_seconds").AsInt(0) : 0;
+   out.initial_lot              = grid.Get("initial_lot")         != NULL ? grid.Get("initial_lot").AsDouble(0)      : 0.0;
 
    //--- Trailing stop. Absent or null means the EA trails nothing, which is a
    //--- valid configuration for a grid and an invalid one for a trailing
@@ -262,9 +257,30 @@ bool ParseStrategy(CJsonNode *root, SGridStrategy &out, string &error)
    if(out.category == CATEGORY_GRID)
      {
       if(out.grid_spacing_points <= 0) { error = "Grid spacing must be greater than zero."; return false; }
-      if(out.grid_levels <= 0)         { error = "Grid levels must be greater than zero.";  return false; }
-      if(out.lot_mode == LOT_MULTIPLIER && out.lot_multiplier < 1.0)
-        { error = "Lot multiplier must be at least 1."; return false; }
+      if(out.grid_buy_orders < 0 || out.grid_sell_orders < 0)
+        { error = "Grid order counts cannot be negative."; return false; }
+      if(out.LadderSize() <= 0)
+        { error = "A grid needs at least one Buy Stop or Sell Stop order."; return false; }
+      //--- The ladder is the most the cycle can ever hold, so a ceiling below
+      //--- it is a configuration that contradicts itself. The platform refuses
+      //--- it too; this is the copy that can actually stop an order.
+      if(out.LadderSize() > out.max_positions)
+        { error = "The grid ladder has more orders than maximum positions allows."; return false; }
+      //--- The basket target is the ladder's only exit. Without it every fill
+      //--- would stay open until something else — the daily loss, the user —
+      //--- closed it.
+      if(!out.has_basket_take_profit || out.basket_take_profit <= 0.0)
+        { error = "A grid must have a basket take profit."; return false; }
+      if(out.grid_cycle_pause_seconds <= 0)
+        { error = "The grid's pause between cycles must be at least one second."; return false; }
+
+      //--- A grid position has one exit, the basket target. Whatever trailing
+      //--- settings arrive are not applied to it.
+      out.has_trailing               = false;
+      out.trailing_stop_points       = 0;
+      out.has_trailing_activation    = false;
+      out.trailing_activation_points = 0;
+      out.trailing_step_points       = 0;
      }
    else
      {
@@ -305,15 +321,12 @@ bool ParseStrategy(CJsonNode *root, SGridStrategy &out, string &error)
   }
 
 //+------------------------------------------------------------------+
-//| Lot size for a grid level (1-based), normalised to the broker's   |
-//| volume step and clamped to its min/max.                           |
+//| The lot every order opens with, normalised to the broker's volume |
+//| step and clamped to its min/max.                                  |
 //+------------------------------------------------------------------+
-double GridLotForLevel(const SGridStrategy &strategy, const int level, const string symbol)
+double EntryLot(const SGridStrategy &strategy, const string symbol)
   {
    double lot = strategy.initial_lot;
-
-   if(strategy.lot_mode == LOT_MULTIPLIER && level > 1)
-      lot = strategy.initial_lot * MathPow(strategy.lot_multiplier, level - 1);
 
    double min_lot  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
    double max_lot  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);

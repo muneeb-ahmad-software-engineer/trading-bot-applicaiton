@@ -96,8 +96,8 @@ module Api
 
       def strategy_params
         params.expect(strategy: %i[
-          name direction grid_spacing_points grid_levels initial_lot lot_mode
-          lot_multiplier basket_take_profit basket_stop_loss max_positions
+          name direction grid_spacing_points grid_buy_orders grid_sell_orders
+          grid_cycle_pause_seconds initial_lot basket_take_profit basket_stop_loss max_positions
           max_exposure_lots max_drawdown_percent min_margin_level_percent max_spread_points max_daily_loss
         ])
       end

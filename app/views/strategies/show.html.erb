@@ -1,5 +1,10 @@
 <% content_for :title, "#{@strategy.name} · #{Rails.application.config.x.product.name}" %>
-<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+<% content_for :head do %>
+  <meta name="robots" content="noindex">
+  <%# A broadcast refresh re-renders the page by morphing, keeping the scroll
+      position, rather than replacing it and jumping to the top. %>
+  <%= turbo_refreshes_with method: :morph, scroll: :preserve %>
+<% end %>
 
 <% actions = capture do %>
   <div class="flex flex-wrap gap-2">
@@ -25,6 +30,13 @@
 
 <%= render layout: "shared/app_shell",
            locals: { title: @strategy.name, subtitle: "#{@strategy.symbol} · #{@strategy.direction} direction", actions: } do %>
+
+  <%#
+    Every report from this strategy's terminal broadcasts a refresh, and the
+    page morphs in place (scroll kept, see :head below): connected / waiting,
+    robot state, positions and orders follow the terminal without a reload.
+  %>
+  <%= turbo_stream_from @strategy, :live %>
 
   <div class="mb-4 flex flex-wrap items-center gap-3">
     <%= render "strategies/status_badge", strategy: @strategy,
@@ -140,10 +152,10 @@
              ]
              if @strategy.category_grid?
                setup += [
-                 [ :grid_spacing_points, "Grid spacing (points)", @strategy.grid_spacing_points ],
-                 [ :grid_levels, "Grid levels", @strategy.grid_levels ],
-                 [ :lot_mode, "Lot sizing", @strategy.lot_mode ],
-                 [ :lot_multiplier, "Lot multiplier", (@strategy.lot_mode_multiplier? ? @strategy.lot_multiplier : "—") ]
+                 [ :grid_spacing_points, "Gap between orders (points)", @strategy.grid_spacing_points ],
+                 [ :grid_buy_orders, "Buy Stop orders", @strategy.grid_buy_orders ],
+                 [ :grid_sell_orders, "Sell Stop orders", @strategy.grid_sell_orders ],
+                 [ :grid_cycle_pause_seconds, "Pause between cycles", "#{@strategy.grid_cycle_pause_seconds} s" ]
                ]
              end %>
           <%= render "strategies/setting_rows", rows: setup %>
@@ -173,7 +185,12 @@
   <div class="card mt-4">
     <div class="card-header"><h2 class="heading-4"><%= @strategy.category_reversal? ? "Trailing opposite stop" : "Trailing stop" %></h2></div>
     <div class="card-body">
-      <% if @strategy.trailing_enabled? %>
+      <% if @strategy.category_grid? %>
+        <p class="body-sm">
+          Not configured for a grid. Every position opens from a ladder order and is closed
+          together with the rest of the basket by the basket take profit.
+        </p>
+      <% elsif @strategy.trailing_enabled? %>
         <dl class="space-y-3">
           <%= render "strategies/setting_rows", rows: [
                 [ :trailing_stop_points, "Trailing distance", "#{@strategy.trailing_stop_points} points ($#{number_with_precision(@strategy.trailing_stop_price, precision: 2)})" ],
@@ -220,7 +237,7 @@
       </p>
       <p class="caption mt-2">
         This is an arithmetic property of your settings, not a prediction. It says nothing
-        about whether the grid will reach its last level, or about profit or loss.
+        about whether every ladder order will fill, or about profit or loss.
       </p>
     </div>
   </div>

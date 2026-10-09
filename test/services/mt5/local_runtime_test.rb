@@ -88,8 +88,8 @@ class LocalRuntimeTest < ActiveSupport::TestCase
   test "the expert's inputs are written where MetaTrader looks for them" do
     with_local_runtime do
       strategy = @user.strategies.create!(
-        name: "XAUUSD grid", direction: "both", grid_spacing_points: 150, grid_levels: 5,
-        initial_lot: 0.01, lot_mode: "fixed", max_positions: 10, max_exposure_lots: 0.5
+        name: "XAUUSD grid", direction: "both", grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5, basket_take_profit: 2,
+        initial_lot: 0.01, max_positions: 10, max_exposure_lots: 0.5
       )
       instance = provision!(@user, strategy:)
 
@@ -131,6 +131,25 @@ class LocalRuntimeTest < ActiveSupport::TestCase
       assert_not_equal mine.ea_preset, theirs.ea_preset
       assert_not_equal File.stat(mine.ea_preset).ino, File.stat(theirs.ea_preset).ino
       assert_not_equal File.stat(mine.presets_dir).ino, File.stat(theirs.presets_dir).ino
+    end
+  end
+
+  test "preparing an instance again never writes into the shared template" do
+    with_local_runtime do
+      instance = provision!(@user)
+      runtime = instance.worker_node.runtime
+
+      # Twice more: what a re-provision or a repair does to an existing tree.
+      2.times { runtime.send(:build_terminal_tree, instance) }
+
+      Mt5::Runtime::Local::SHARED_PATHS.each do |path|
+        source = File.join(Mt5.config.template_dir.to_s, path)
+        next unless File.directory?(source)
+
+        nested = File.join(source, File.basename(path))
+        assert_not File.symlink?(nested), "#{path}: a link was created inside the template (#{nested})"
+        assert_equal source, File.readlink(File.join(instance.terminal_dir, path))
+      end
     end
   end
 

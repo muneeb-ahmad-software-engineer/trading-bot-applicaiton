@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_09_28_130000) do
+ActiveRecord::Schema[8.0].define(version: 2026_10_05_120000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -406,10 +406,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_09_28_130000) do
     t.string "status", default: "draft", null: false
     t.string "direction", default: "both", null: false
     t.integer "grid_spacing_points"
-    t.integer "grid_levels"
     t.decimal "initial_lot", precision: 10, scale: 2, null: false
-    t.string "lot_mode", default: "fixed", null: false
-    t.decimal "lot_multiplier", precision: 6, scale: 2
     t.decimal "basket_take_profit", precision: 15, scale: 2
     t.decimal "basket_stop_loss", precision: 15, scale: 2
     t.integer "max_positions", null: false
@@ -428,11 +425,14 @@ ActiveRecord::Schema[8.0].define(version: 2026_09_28_130000) do
     t.integer "entry_distance_points"
     t.decimal "max_daily_loss", precision: 15, scale: 2
     t.datetime "emergency_stopped_at"
+    t.integer "grid_buy_orders"
+    t.integer "grid_sell_orders"
+    t.integer "grid_cycle_pause_seconds", default: 10, null: false
     t.index ["user_id", "category"], name: "index_strategies_on_user_id_and_category"
     t.index ["user_id", "status"], name: "index_strategies_on_user_id_and_status"
     t.index ["user_id", "symbol"], name: "index_strategies_one_running_per_symbol", unique: true, where: "((status)::text = 'running'::text)"
     t.index ["user_id"], name: "index_strategies_on_user_id"
-    t.check_constraint "category::text <> 'grid'::text OR grid_spacing_points IS NOT NULL AND grid_levels IS NOT NULL", name: "grid_strategies_have_a_grid"
+    t.check_constraint "category::text <> 'grid'::text OR grid_spacing_points IS NOT NULL AND grid_buy_orders IS NOT NULL AND grid_sell_orders IS NOT NULL", name: "grid_strategies_have_a_grid"
     t.check_constraint "category::text <> 'trailing'::text OR trailing_stop_points IS NOT NULL", name: "trailing_strategies_have_a_distance"
   end
 
@@ -455,6 +455,11 @@ ActiveRecord::Schema[8.0].define(version: 2026_09_28_130000) do
     t.decimal "reversal_level", precision: 15, scale: 5
     t.decimal "daily_profit", precision: 15, scale: 2
     t.string "risk_halt"
+    t.integer "cycle_number"
+    t.integer "resting_orders"
+    t.integer "filled_orders"
+    t.decimal "basket_profit", precision: 15, scale: 2
+    t.integer "pause_seconds_left"
     t.index ["api_token_id"], name: "index_terminal_connections_on_api_token_id", unique: true
     t.index ["strategy_id"], name: "index_terminal_connections_on_strategy_id"
     t.index ["user_id"], name: "index_terminal_connections_on_user_id"

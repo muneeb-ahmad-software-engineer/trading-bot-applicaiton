@@ -5,8 +5,8 @@ require "test_helper"
 class ApiV1StrategiesTest < ActionDispatch::IntegrationTest
   VALID = {
     name: "XAUUSD grid", direction: "both",
-    grid_spacing_points: 150, grid_levels: 5,
-    initial_lot: 0.01, lot_mode: "fixed",
+    grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5, basket_take_profit: 2,
+    initial_lot: 0.01,
     max_positions: 10, max_exposure_lots: 0.5
   }.freeze
 
@@ -52,7 +52,9 @@ class ApiV1StrategiesTest < ActionDispatch::IntegrationTest
     payload = json["strategy"]
     assert_equal "XAUUSD", payload["symbol"]
     assert_equal 150, payload.dig("grid", "spacing_points")
-    assert_equal 5, payload.dig("grid", "levels")
+    assert_equal 5, payload.dig("grid", "buy_stop_orders")
+    assert_equal 5, payload.dig("grid", "sell_stop_orders")
+    assert_equal 10, payload.dig("grid", "cycle_pause_seconds")
     assert_equal 10, payload.dig("risk", "max_positions")
     assert_equal "draft", payload["status"]
   end
@@ -73,11 +75,11 @@ class ApiV1StrategiesTest < ActionDispatch::IntegrationTest
     end
     assert_response :created
 
-    post "/api/v1/strategies", params: { strategy: VALID.merge(grid_levels: 0) }, headers: headers, as: :json
+    post "/api/v1/strategies", params: { strategy: VALID.merge(grid_buy_orders: 0, grid_sell_orders: 0) }, headers: headers, as: :json
 
     assert_response :unprocessable_entity
     assert_equal "validation_failed", json.dig("error", "code")
-    assert json.dig("error", "details").key?("grid_levels")
+    assert json.dig("error", "details").key?("grid_buy_orders")
   end
 
   test "start and stop drive the lifecycle" do
@@ -106,9 +108,9 @@ class ApiV1StrategiesTest < ActionDispatch::IntegrationTest
     strategy = @user.strategies.create!(VALID)
     strategy.start!
 
-    patch "/api/v1/strategies/#{strategy.id}", params: { strategy: { grid_levels: 8, max_exposure_lots: 1.0 } }, headers: headers, as: :json
+    patch "/api/v1/strategies/#{strategy.id}", params: { strategy: { grid_buy_orders: 4, max_exposure_lots: 1.0 } }, headers: headers, as: :json
     assert_response :success
-    assert_equal 8, strategy.reload.grid_levels
+    assert_equal 4, strategy.reload.grid_buy_orders
     assert_predicate strategy, :running?
   end
 

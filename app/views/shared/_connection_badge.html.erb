@@ -1,0 +1,27 @@
+<%#
+  The sidebar's terminal status, on every signed-in page.
+
+  Replaced by a Turbo Stream broadcast on every terminal report (see
+  Trading::IngestReport#broadcast_dashboard), so it must not depend on
+  anything a controller sets up: only `user`.
+
+  The freshness controller counts from the report time rendered here. Before
+  this was broadcast, the badge kept the time of the page load, so on any page
+  left open it turned "Not reporting" 90 s later and stayed that way while the
+  terminal went on reporting and trading. Each broadcast now replaces the
+  element, which restarts the count from the latest report; the badge goes
+  stale only when reports really stop.
+%>
+<% snapshot = DashboardSnapshot.new(user) %>
+<div id="sidebar-connection-status"
+     class="sidebar-status mb-3"
+     data-controller="connection-freshness"
+     data-connection-freshness-last-report-value="<%= snapshot.last_report_iso %>"
+     data-connection-freshness-stale-after-value="<%= DashboardSnapshot::STALE_AFTER.to_i %>">
+  <span data-connection-freshness-target="status">
+    <%= render "dashboard/connection_status", connection: snapshot.connection %>
+  </span>
+  <span class="caption sidebar-status-detail" data-connection-freshness-target="age">
+    <%= snapshot.connection&.last_report_at ? "#{time_ago_in_words(snapshot.connection.last_report_at)} ago" : "No terminal yet" %>
+  </span>
+</div>

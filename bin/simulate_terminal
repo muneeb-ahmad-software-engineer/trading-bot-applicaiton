@@ -12,8 +12,9 @@
 #   bin/simulate_terminal --token ggk_xxx --strategy 1 --once
 #
 # Scenarios:
-#   winning   basket drifts into profit          (default)
-#   losing    basket drifts into loss
+#   winning   a grid cycle: a ladder of stop orders with some rungs filled,
+#             the basket drifting into profit    (default)
+#   losing    the same ladder, the basket drifting into loss
 #   margin    margin level falls below a limit   (should raise an alert)
 #   silent    reports once, then stops           (should raise a stale-terminal alert)
 #   trailing  a buy and a sell running side by side, each with a trailing stop
@@ -202,9 +203,12 @@ send_report = lambda do
   bid = BASE_PRICE + drift + rand(-0.4..0.4)
   ask = bid + 0.05
 
+  # A grid cycle: `levels` rungs have filled (buys, as if price rose through
+  # them), the rest of a 5 + 5 ladder still rests, and the EA reports the
+  # cycle the way mt5/Include/GoldGrid/Cycle.mqh does.
   positions = Array.new(options[:levels]) do |i|
     open_price = BASE_PRICE - (i * 15)
-    volume = 0.01 * (i + 1)
+    volume = 0.01
     # Profit in account currency: 100 units per whole point, per lot.
     profit = (bid - open_price) * volume * 100
 
@@ -237,11 +241,19 @@ send_report = lambda do
     account: { currency: "USD", balance: money(balance), equity: money(equity),
                margin: money(margin), free_margin: money(equity - margin),
                margin_level_percent: money(margin_level) },
+    execution: { state: "ARMED", reason: "ladder complete — #{10 - options[:levels]} resting, #{options[:levels]} filled, 0 skipped, capacity 10",
+                 reversal_level: price(0), daily_profit: money(equity_change), risk_halt: "",
+                 cycle: 1 + tick / 50, resting_orders: 10 - options[:levels], filled_orders: options[:levels],
+                 basket_profit: money(equity_change), pause_seconds_left: 0 },
     positions: positions,
-    orders: [ { ticket: "SIM2001", order_type: "buy_limit",
-                grid_level: options[:levels] + 1, volume: money(0.01 * (options[:levels] + 1)),
-                price: price(BASE_PRICE - (options[:levels] * 15)),
-                placed_at: (Time.now - 3600).utc.strftime("%Y-%m-%dT%H:%M:%SZ") } ]
+    orders: Array.new([ 10 - options[:levels], 0 ].max) do |i|
+      buy = i.even?
+      rung = i / 2 + 1 + (buy ? options[:levels] : 0)
+      { ticket: "SIM#{2000 + i}", order_type: buy ? "buy_stop" : "sell_stop", grid_level: rung,
+        volume: money(0.01),
+        price: price(buy ? BASE_PRICE + 2.0 * rung : BASE_PRICE - 2.0 * rung),
+        placed_at: (Time.now - 3600).utc.strftime("%Y-%m-%dT%H:%M:%SZ") }
+    end
   }
 
   request = Net::HTTP::Post.new(uri)

@@ -7,8 +7,8 @@ class AuditTrailTest < ActionDispatch::IntegrationTest
 
   VALID = {
     name: "XAUUSD grid", direction: "both",
-    grid_spacing_points: 150, grid_levels: 5,
-    initial_lot: 0.01, lot_mode: "fixed",
+    grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5, basket_take_profit: 2,
+    initial_lot: 0.01,
     max_positions: 10, max_exposure_lots: 0.5
   }.freeze
 
@@ -44,8 +44,8 @@ class AuditTrailTest < ActionDispatch::IntegrationTest
 
     # Captured at start, so editing afterwards cannot rewrite what was run.
     assert_equal "XAUUSD", event.metadata["symbol"]
-    assert_equal 5, event.metadata["grid_levels"]
-    assert_equal "0.05", event.metadata["maximum_theoretical_lots"]
+    assert_equal 5, event.metadata["grid_buy_orders"]
+    assert_equal "0.1", event.metadata["maximum_theoretical_lots"]
   end
 
   test "issuing and revoking an API token is recorded" do

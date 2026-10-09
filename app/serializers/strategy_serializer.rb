@@ -29,18 +29,20 @@ class StrategySerializer < ApplicationSerializer
 
   private
 
+  # The ladder. Every key is null for a trailing or reversal strategy, which
+  # rests no ladder; the EA reads them only for a grid.
   def grid
     {
       spacing_points: object.grid_spacing_points,
-      levels: object.grid_levels,
-      initial_lot: lots(object.initial_lot),
-      lot_mode: object.lot_mode,
-      lot_multiplier: decimal(object.lot_multiplier, 2)
+      buy_stop_orders: object.grid_buy_orders,
+      sell_stop_orders: object.grid_sell_orders,
+      cycle_pause_seconds: object.category_grid? ? object.grid_cycle_pause_seconds : nil,
+      initial_lot: lots(object.initial_lot)
     }
   end
 
-  # Null distance means the EA trails nothing. It is sent for every strategy,
-  # including grids, because a grid may opt into the exit as well.
+  # Null distance means the EA trails nothing. Sent for every strategy; a grid
+  # always carries nulls here, because its positions exit on the basket target.
   def trailing
     {
       stop_points: object.trailing_stop_points,

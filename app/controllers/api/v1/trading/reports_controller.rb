@@ -36,7 +36,8 @@ module Api
           params.permit(
             :strategy_id,
             terminal: %i[ea_version broker account_login symbol],
-            execution: %i[state reason reversal_level daily_profit risk_halt],
+            execution: %i[state reason reversal_level daily_profit risk_halt
+                          cycle resting_orders filled_orders basket_profit pause_seconds_left],
             tick: %i[bid ask spread_points],
             account: %i[currency balance equity margin free_margin margin_level_percent],
             positions: %i[ticket direction grid_level volume open_price current_price stop_loss profit swap commission opened_at],

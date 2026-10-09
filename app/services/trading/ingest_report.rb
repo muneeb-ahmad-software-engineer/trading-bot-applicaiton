@@ -30,7 +30,7 @@ module Trading
         sync_orders(strategy) if strategy
 
         Result.new(success?: true, connection:, errors: [])
-      end.tap { broadcast_dashboard }
+      end.tap { broadcast_dashboard(strategy) }
     rescue ActiveRecord::RecordInvalid => e
       failure(e.record.errors.full_messages)
     end
@@ -71,6 +71,12 @@ module Trading
         reversal_level: positive_decimal(execution[:reversal_level]),
         daily_profit: execution[:daily_profit].presence,
         risk_halt: execution[:risk_halt].to_s.truncate(255).presence,
+        # The grid's cycle. Null from the other categories, which have none.
+        cycle_number: whole_number(execution[:cycle]),
+        resting_orders: whole_number(execution[:resting_orders]),
+        filled_orders: whole_number(execution[:filled_orders]),
+        basket_profit: execution[:basket_profit].presence,
+        pause_seconds_left: whole_number(execution[:pause_seconds_left]),
         last_report_at: Time.current
       )
       first_report = connection.new_record? || connection.last_report_at.nil?
@@ -124,6 +130,14 @@ module Trading
     # fact from a stop at price zero, and storing it as a number would put a
     # 0.00000 stop level in front of the user on every position that has none.
     # A price the EA sends as zero when it has none.
+    def whole_number(value)
+      return nil if value.blank?
+
+      Integer(value.to_s, 10)
+    rescue ArgumentError
+      nil
+    end
+
     def positive_decimal(value)
       return nil if value.blank?
       return nil if value.to_d <= 0
@@ -222,7 +236,14 @@ module Trading
         seen << order.ticket
       end
 
-      strategy.orders.pending.where.not(ticket: seen).update_all(status: "cancelled", updated_at: Time.current)
+      # An order that stopped being reported either filled or was cancelled.
+      # A stop order that fills becomes a position under the SAME ticket (MT5
+      # keeps the number), so a vanished order whose ticket is now a position
+      # of this strategy filled; anything else was cancelled or deleted.
+      vanished = strategy.orders.pending.where.not(ticket: seen)
+      filled   = strategy.positions.where(ticket: vanished.pluck(:ticket)).pluck(:ticket)
+      strategy.orders.pending.where(ticket: filled).update_all(status: "filled", updated_at: Time.current)
+      strategy.orders.pending.where.not(ticket: seen + filled).update_all(status: "cancelled", updated_at: Time.current)
     end
 
     # Pushes the refreshed dashboard to any browser this account has open.
@@ -230,15 +251,35 @@ module Trading
     # Enqueued rather than rendered inline: a push to the browser must not add
     # latency to the terminal's report, and a failure to reach a browser must
     # never fail the ingestion of trading data.
-    def broadcast_dashboard
-      Turbo::StreamsChannel.broadcast_replace_later_to(
-        [ user, :dashboard ],
-        target: "dashboard-live",
-        partial: "dashboard/live",
-        locals: { user: user }
-      )
+    def broadcast_dashboard(strategy)
+      # The dashboard's live region (a page without the target ignores it).
+      broadcasting("dashboard") do
+        Turbo::StreamsChannel.broadcast_replace_later_to(
+          [ user, :dashboard ], target: "dashboard-live", partial: "dashboard/live", locals: { user: user }
+        )
+      end
+      # The sidebar's connection badge, on every signed-in page: replacing it
+      # restarts the browser's staleness count from this report.
+      broadcasting("sidebar badge") do
+        Turbo::StreamsChannel.broadcast_replace_later_to(
+          [ user, :dashboard ], target: "sidebar-connection-status", partial: "shared/connection_badge",
+          locals: { user: user }
+        )
+      end
+      # The strategy's own page re-renders in place (a morph refresh), so its
+      # terminal panel, robot state, positions and orders follow the reports.
+      # Turbo debounces these, so a burst of reports is one refresh.
+      return if strategy.nil?
+
+      broadcasting("strategy page") { Turbo::StreamsChannel.broadcast_refresh_later_to(strategy, :live) }
+    end
+
+    # Each broadcast on its own: one that fails (a queue or cable hiccup) must
+    # neither fail the terminal's report nor stop the others from going out.
+    def broadcasting(what)
+      yield
     rescue StandardError => e
-      Rails.logger.warn("Dashboard broadcast failed for user #{user.id}: #{e.class} #{e.message}")
+      Rails.logger.warn("#{what} broadcast failed for user #{user.id}: #{e.class} #{e.message}")
     end
 
     def failure(errors) = Result.new(success?: false, connection: nil, errors:)

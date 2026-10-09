@@ -9,7 +9,7 @@ import { Controller } from "@hotwired/stimulus"
 // Without JavaScript every section stays visible and the form still submits
 // correctly — the irrelevant fields are simply ignored for that category.
 export default class extends Controller {
-  static targets = ["category", "grid", "reversal", "trailingRequired"]
+  static targets = ["category", "grid", "singlePosition", "reversal", "trailingRequired", "gridRequired"]
 
   connect() {
     this.apply()
@@ -19,14 +19,22 @@ export default class extends Controller {
     const category = this.categoryTarget.value
 
     this.toggle(this.gridTargets, category === "grid")
+    // Direction and the trailing stop belong to the single-position categories.
+    // A grid's two order counts decide its sides, and its positions exit on the
+    // basket target alone. Toggled before the reversal targets, which sit
+    // inside the trailing section and must win for their own inputs.
+    this.toggle(this.singlePositionTargets, category !== "grid")
     this.toggle(this.reversalTargets, category === "reversal")
 
     // A trailing or reversal strategy has no other exit, so its distance is
-    // mandatory.
-    // Marking it required here matches the model, and keeps the browser from
+    // mandatory; a grid's only exit is the basket take profit.
+    // Marking them required here matches the model, and keeps the browser from
     // letting an empty form reach the server for no reason.
     this.trailingRequiredTargets.forEach((field) => {
       field.required = category !== "grid"
+    })
+    this.gridRequiredTargets.forEach((field) => {
+      field.required = category === "grid"
     })
   }
 

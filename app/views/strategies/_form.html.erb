@@ -20,34 +20,34 @@
           <div class="field field-wide">
             <%= label_with_info(form, :category, "Strategy type") %>
             <%= form.select :category,
-                  [ [ "Grid — add levels as price moves against the basket", "grid" ],
+                  [ [ "Grid — a ladder of Buy Stop and Sell Stop orders, closed together at a profit target", "grid" ],
                     [ "Trailing stop — one position per direction, stop follows the price", "trailing" ],
                     [ "Reversal — always in one trade; a trailing opposite order flips it when price turns", "reversal" ] ],
                   {}, class: "select", disabled: strategy.category_locked?,
                   data: { strategy_category_target: "category", action: "change->strategy-category#apply" },
                   "aria-describedby": "category_hint" %>
             <p class="field-hint" id="category_hint">
-              A grid averages into a move. A trailing strategy takes one position and lets
-              the stop follow price in the favourable direction only. Both types can use a
-              trailing stop; only a grid has levels. A reversal strategy holds one trade at a
-              time, with no stop loss: a stop order for the opposite side trails behind it at the
-              trailing distance. When price turns that far, that order fills and the old trade is
-              closed, so the opposite one takes its place. It needs a hedging account, both
-              directions, and no activation.
+              A grid rests a ladder of stop orders on both sides of the market and lets price
+              fill whichever it reaches; everything that filled is closed together once the
+              combined profit reaches the basket take profit, and the ladder is placed again
+              after a pause. A trailing strategy takes one position and lets the stop follow
+              price in the favourable direction only. A reversal strategy holds one trade at a
+              time, with no stop loss: a stop order for the opposite side trails behind it at
+              the trailing distance, and when price turns that far the opposite trade takes
+              its place. Grid and reversal need a hedging account.
             </p>
           </div>
 
-          <div class="field">
+          <div class="field" data-strategy-category-target="singlePosition">
             <%= label_with_info(form, :direction, "Order direction") %>
             <%= form.select :direction,
                   [ [ "Both directions", "both" ], [ "Buy only", "buy" ], [ "Sell only", "sell" ] ],
                   {}, class: "select", "aria-describedby": "direction_hint" %>
             <p class="field-hint" id="direction_hint">
-              Both directions runs a buy side and a sell side independently and
-              continuously: each exits on its own and opens again as soon as it is flat.
-              It needs a <strong>hedging</strong> broker account — on a netting account one
-              symbol holds a single position, so a buy and a sell would cancel each other
-              out and your Expert Advisor will refuse the second side.
+              Trailing strategies only; a grid's two order counts decide its sides. With
+              both directions the robot alternates: after a buy is stopped out the next entry
+              is a sell, and the other way round. Buy only or sell only re-enters the same
+              way each time.
             </p>
           </div>
 
@@ -75,28 +75,11 @@
             <%= form.number_field :initial_lot, class: "input-numeric", required: true, step: 0.01, min: 0.01,
                   "aria-describedby": "initial_lot_hint", "aria-invalid": strategy.errors[:initial_lot].any? %>
             <p class="field-hint" id="initial_lot_hint">
-              The size of the first position. A grid scales from here; a trailing strategy
-              opens this size and nothing more.
+              The size of every order. A grid places this lot on each ladder order; a
+              trailing or reversal strategy opens this size and nothing more.
             </p>
           </div>
 
-          <div class="field" data-strategy-category-target="grid">
-            <%= label_with_info(form, :lot_mode, "Lot sizing mode") %>
-            <%= form.select :lot_mode,
-                  [ [ "Fixed — every level the same size", "fixed" ],
-                    [ "Multiplier — each level scales up", "multiplier" ] ],
-                  {}, class: "select" %>
-          </div>
-
-          <div class="field field-wide" data-strategy-category-target="grid">
-            <%= label_with_info(form, :lot_multiplier, "Lot multiplier") %>
-            <%= form.number_field :lot_multiplier, class: "input-numeric", step: 0.01, min: 1,
-                  "aria-describedby": "multiplier_hint", "aria-invalid": strategy.errors[:lot_multiplier].any? %>
-            <p class="field-hint" id="multiplier_hint">
-              Only used in multiplier mode. Scaling lot sizes increases exposure quickly:
-              each level is this many times the previous one.
-            </p>
-          </div>
         </div>
       </fieldset>
     </div>
@@ -106,35 +89,60 @@
     <div class="card-body">
       <fieldset class="form-section">
         <legend class="heading-4">Grid</legend>
-        <p class="form-section-description">How levels are spaced. Grid strategies only.</p>
+        <p class="form-section-description">
+          A ladder of resting stop orders: Buy Stops above the market, Sell Stops below it.
+          Grid strategies only.
+        </p>
         <div class="form-section-body">
           <div class="field">
-            <%= label_with_info(form, :grid_spacing_points, "Grid spacing (points)") %>
+            <%= label_with_info(form, :grid_spacing_points, "Gap between orders (points)") %>
             <%= form.number_field :grid_spacing_points, class: "input-numeric", min: 1,
+                  data: { strategy_category_target: "gridRequired" },
                   "aria-describedby": "spacing_hint", "aria-invalid": strategy.errors[:grid_spacing_points].any? %>
             <p class="field-hint" id="spacing_hint">
-              Distance between levels. <%= points_as_price_hint(strategy.grid_spacing_points) %>
+              From the market to the first order, and from each order to the next.
+              <%= points_as_price_hint(strategy.grid_spacing_points) %>
             </p>
           </div>
 
           <div class="field">
-            <%= label_with_info(form, :grid_levels, "Grid levels") %>
-            <%= form.number_field :grid_levels, class: "input-numeric", min: 1,
-                  "aria-invalid": strategy.errors[:grid_levels].any? %>
+            <%= label_with_info(form, :grid_buy_orders, "Buy Stop orders") %>
+            <%= form.number_field :grid_buy_orders, class: "input-numeric", min: 0,
+                  data: { strategy_category_target: "gridRequired" },
+                  "aria-invalid": strategy.errors[:grid_buy_orders].any? %>
+          </div>
+
+          <div class="field">
+            <%= label_with_info(form, :grid_sell_orders, "Sell Stop orders") %>
+            <%= form.number_field :grid_sell_orders, class: "input-numeric", min: 0,
+                  data: { strategy_category_target: "gridRequired" },
+                  "aria-invalid": strategy.errors[:grid_sell_orders].any? %>
+          </div>
+
+          <div class="field">
+            <%= label_with_info(form, :grid_cycle_pause_seconds, "Pause between cycles (seconds)") %>
+            <%= form.number_field :grid_cycle_pause_seconds, class: "input-numeric", min: 1,
+                  data: { strategy_category_target: "gridRequired" },
+                  "aria-describedby": "pause_hint", "aria-invalid": strategy.errors[:grid_cycle_pause_seconds].any? %>
+            <p class="field-hint" id="pause_hint">
+              After the basket closes and its remaining orders are cancelled, the robot waits
+              this long before placing the next ladder at the new market price.
+            </p>
           </div>
         </div>
       </fieldset>
     </div>
   </div>
 
-  <div class="card">
+  <div class="card" data-strategy-category-target="singlePosition">
     <div class="card-body">
       <fieldset class="form-section">
         <legend class="heading-4">Trailing stop</legend>
         <p class="form-section-description">
           A stop that follows the price in the favourable direction and never moves back.
-          Required for a trailing strategy; optional on a grid, where it sits alongside the
-          basket exits and applies to each position individually.
+          Required for a trailing strategy. A reversal strategy uses the distance for the
+          opposite order that trails its position. A grid has none: its positions are
+          closed by the basket take profit.
         </p>
         <div class="form-section-body">
           <div class="field field-wide">
@@ -197,11 +205,16 @@
     <div class="card-body">
       <fieldset class="form-section">
         <legend class="heading-4">Basket exits</legend>
-        <p class="form-section-description">When a basket of positions is closed as a whole. Leave blank for none.</p>
+        <p class="form-section-description">
+          When every open position is closed together, on their combined profit or loss in
+          account currency. The take profit is a grid's only exit and is required for it;
+          the stop loss is an optional safety net. Leave blank for none.
+        </p>
         <div class="form-section-body">
           <div class="field">
             <%= label_with_info(form, :basket_take_profit, "Basket take profit") %>
-            <%= form.number_field :basket_take_profit, class: "input-numeric", step: 0.01, min: 0,
+            <%= form.number_field :basket_take_profit, class: "input-numeric", step: 0.01, min: 0.01,
+                  data: { strategy_category_target: "gridRequired" },
                   "aria-invalid": strategy.errors[:basket_take_profit].any? %>
           </div>
           <div class="field">

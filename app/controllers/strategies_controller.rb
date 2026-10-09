@@ -115,12 +115,14 @@ class StrategiesController < ApplicationController
       name: "XAUUSD grid",
       category: "grid",
       direction: "both",
-      grid_spacing_points: 150,
-      grid_levels: 5,
+      grid_spacing_points: 200,
+      grid_buy_orders: 30,
+      grid_sell_orders: 30,
+      grid_cycle_pause_seconds: 10,
       initial_lot: 0.01,
-      lot_mode: "fixed",
-      max_positions: 10,
-      max_exposure_lots: 0.5,
+      basket_take_profit: 2,
+      max_positions: 60,
+      max_exposure_lots: 0.6,
       max_drawdown_percent: 20,
       min_margin_level_percent: 200,
       max_spread_points: 50
@@ -129,8 +131,8 @@ class StrategiesController < ApplicationController
 
   def strategy_params
     params.expect(strategy: %i[
-      name category direction grid_spacing_points grid_levels initial_lot lot_mode
-      lot_multiplier trailing_stop_points trailing_activation_points
+      name category direction grid_spacing_points grid_buy_orders grid_sell_orders
+      grid_cycle_pause_seconds initial_lot trailing_stop_points trailing_activation_points
       trailing_step_points entry_distance_points basket_take_profit basket_stop_loss max_positions
       max_exposure_lots max_drawdown_percent min_margin_level_percent max_spread_points max_daily_loss
     ])

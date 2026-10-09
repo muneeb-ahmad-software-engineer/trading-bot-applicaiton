@@ -23,14 +23,14 @@
               <%= render "strategies/status_badge", strategy:,
                          executing: terminal_executing?(connection: strategy.terminal_connection, instance: @instance, strategy:) %>
             </div>
-            <%# A trailing strategy has no levels or spacing, so the card shows what
-                it does have rather than three dashes where the numbers used to be. %>
+            <%# A trailing strategy has no ladder, so the card shows what it does
+                have rather than dashes where the numbers used to be. %>
             <dl class="mt-4 grid grid-cols-3 gap-3">
               <% if strategy.single_position? %>
                 <div class="stat"><dt class="stat-label">Trail</dt><dd class="figure-sm"><%= strategy.trailing_stop_points %></dd></div>
                 <div class="stat"><dt class="stat-label">Step</dt><dd class="figure-sm"><%= strategy.trailing_step_points %></dd></div>
               <% else %>
-                <div class="stat"><dt class="stat-label">Levels</dt><dd class="figure-sm"><%= strategy.grid_levels %></dd></div>
+                <div class="stat"><dt class="stat-label">Orders</dt><dd class="figure-sm"><%= strategy.grid_buy_orders.to_i %> + <%= strategy.grid_sell_orders.to_i %></dd></div>
                 <div class="stat"><dt class="stat-label">Spacing</dt><dd class="figure-sm"><%= strategy.grid_spacing_points %></dd></div>
               <% end %>
               <div class="stat"><dt class="stat-label">Entry lot</dt><dd class="figure-sm"><%= strategy.initial_lot %></dd></div>

@@ -5,8 +5,8 @@ class StrategyLiveViewTest < ActionDispatch::IntegrationTest
 
   VALID = {
     name: "XAUUSD grid", direction: "both",
-    grid_spacing_points: 150, grid_levels: 5,
-    initial_lot: 0.01, lot_mode: "fixed",
+    grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5, basket_take_profit: 2,
+    initial_lot: 0.01,
     max_positions: 10, max_exposure_lots: 0.5
   }.freeze
 
@@ -53,6 +53,43 @@ class StrategyLiveViewTest < ActionDispatch::IntegrationTest
     assert_match(/Sells\s+if price reaches/, response.body)
     assert_match(/2316.40/, response.body)
     assert_match(/Trading halted by a risk control/, response.body)
+  end
+
+  test "a grid's robot state shows its cycle, ladder, basket and pause" do
+    @strategy.start!
+    TerminalConnection.create!(
+      user: @user, strategy: @strategy, api_token: ApiToken.issue(user: @user, name: "MT5"),
+      symbol: "XAUUSD", last_report_at: Time.current,
+      execution_state: "ARMED", execution_reason: "ladder complete — 8 resting, 2 filled, 0 skipped, capacity 10",
+      cycle_number: 3, resting_orders: 8, filled_orders: 2, basket_profit: -0.84, pause_seconds_left: 0
+    )
+
+    get strategy_path(@strategy)
+
+    assert_select "h2", text: "Robot state"
+    assert_match(/Ladder in place/, response.body)
+    assert_match(/Cycle/, response.body)
+    assert_match(/2 filled/, response.body)
+    assert_match(/8 resting/, response.body)
+    assert_match(/Basket P\/L/, response.body)
+    assert_match(/of 2\.00 target/, response.body)
+    assert_no_match(/Next cycle in/, response.body, "the pause is only shown in COOLDOWN")
+  end
+
+  test "a grid in COOLDOWN shows the pause left before the next cycle" do
+    @strategy.start!
+    TerminalConnection.create!(
+      user: @user, strategy: @strategy, api_token: ApiToken.issue(user: @user, name: "MT5"),
+      symbol: "XAUUSD", last_report_at: Time.current,
+      execution_state: "COOLDOWN", execution_reason: "confirmed flat; pausing 10 s",
+      cycle_number: 4, resting_orders: 0, filled_orders: 0, basket_profit: 0, pause_seconds_left: 7
+    )
+
+    get strategy_path(@strategy)
+
+    assert_match(/pausing before the next cycle/, response.body)
+    assert_match(/Next cycle in/, response.body)
+    assert_match(/7 seconds/, response.body)
   end
 
   test "risk meters report utilisation against the configured limits" do

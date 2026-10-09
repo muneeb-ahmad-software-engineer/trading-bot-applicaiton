@@ -9,7 +9,7 @@ class SerializerTest < ActiveSupport::TestCase
   setup do
     @user = users(:verified)
     @strategy = @user.strategies.create!(
-      name: "XAUUSD grid", grid_spacing_points: 150, grid_levels: 5,
+      name: "XAUUSD grid", grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5,
       initial_lot: 0.01, max_positions: 10, max_exposure_lots: 0.5,
       max_drawdown_percent: 20, basket_take_profit: 250
     )
@@ -58,8 +58,8 @@ class SerializerTest < ActiveSupport::TestCase
 
   test "collection serialisation matches single serialisation" do
     other = @user.strategies.create!(
-      name: "second", grid_spacing_points: 100, grid_levels: 3,
-      initial_lot: 0.01, max_positions: 5, max_exposure_lots: 0.5
+      name: "second", grid_spacing_points: 100, grid_buy_orders: 3, grid_sell_orders: 2,
+      basket_take_profit: 2, initial_lot: 0.01, max_positions: 5, max_exposure_lots: 0.5
     )
 
     collection = StrategySerializer.collection([ @strategy, other ])

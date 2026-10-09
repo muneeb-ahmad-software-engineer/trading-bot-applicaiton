@@ -155,18 +155,18 @@ exit.
 
 | Category | Opens | Exits with |
 | --- | --- | --- |
-| `grid` | A level at a time, as price moves against the basket | Basket take profit / stop loss, and optionally a trailing stop per position |
+| `grid` | A **ladder** of resting Buy Stop orders above the market and Sell Stop orders below it, one gap apart; rungs fill only when price reaches them | **One combined basket target**: when the floating P/L of every open position together reaches `basket_take_profit`, all positions close, the rest of the ladder is cancelled, and after `grid_cycle_pause_seconds` a new ladder is placed at the new price. Optional basket stop loss. No trailing stop |
 | `trailing` | **One position in total**, at market, and nothing more until it closes | Its trailing stop (mandatory), plus the basket exits if set |
-| `reversal` | **One position in total**. Flat, it brackets the market with a buy stop and a sell stop; after that it flips side each time the trailing opposite stop fills | **No stop loss.** A stop order for the opposite side trails behind the position; when it fills, the old position is closed and the new one takes over |
+| `reversal` | **One position in total**. Flat, it brackets the market with a buy stop and a sell stop; after that it flips side each time the trailing opposite stop fills | One trailing exit price, held by the broker twice: the position's **stop loss** (closes it) and a **stop order for the opposite side** at the same price (opens the reversal). Both trigger on the same tick |
 
-### Grid, both directions
+### Grid — a hedging account is required
 
-With `direction: both` a **grid** runs its buy basket and sell basket
-independently. Each re-opens once it is flat. The ceilings (`max_positions`,
-`max_exposure_lots`, drawdown, margin) apply across both together.
-
-> **This needs a hedging account.** On a netting account a buy and a sell on one
-> symbol cancel out. The EA says so at startup and refuses the opposing side.
+A grid holds buy and sell positions side by side, so it **needs a hedging
+account**. On a netting account a buy and a sell on one symbol cancel out; the
+EA refuses to place the ladder and says so once in the log. The ceilings
+(`max_positions`, `max_exposure_lots`, drawdown, margin) count every resting
+rung as well as every open position: the limits are promises about the worst
+case, and every rung can fill. Details in *How the grid works* below.
 
 ### One active position — trailing and reversal
 
@@ -200,8 +200,10 @@ path:
 While flat, a reversal strategy rests **exactly one Buy Stop** the entry
 distance above the ask and **one Sell Stop** the same distance below the bid.
 The entry distance is set on the platform and falls back to the trailing
-distance when left blank. The orders carry **no stop loss**: the moment one
-fills, its position gets its trailing opposite stop instead.
+distance when left blank. Each order carries the **stop loss its position
+opens with**, the trailing distance behind the price it would close at, so a
+filled position is protected by the broker from its first tick, even with the
+terminal offline.
 
 - The first order to fill becomes the only position, and the other is cancelled
   immediately.
@@ -209,7 +211,7 @@ fills, its position gets its trailing opposite stop instead.
   this magic number, is deleted.
 - Each order's comment records its strategy and distance
   (`GG:<id>:L1:D<points>`). If the distance, strategy or lot size changes, or an
-  order carries a stop loss (placed by an earlier build), both orders are
+  order has no stop loss (placed by an earlier build), both orders are
   withdrawn and placed again around the current price.
 - An entry distance inside the broker's minimum stop level is widened to the
   nearest accepted distance, and the log says so.
@@ -227,52 +229,67 @@ as `GoldGrid: state A -> B (reason)`.
 | `INITIALIZING` | Just started. The EA reads the broker's positions before doing anything. |
 | `WAITING` | Flat. The only state an entry can be placed from. |
 | `BUY_ACTIVE` / `SELL_ACTIVE` | Exactly one position open. |
-| `REVERSING` | The opposite stop filled; the EA is closing the old position. |
+| `REVERSING` | The opposite stop filled while the old position was still open (its stop loss could not be set in time); the EA is closing the old position. |
 | `CLOSING` | The EA sent a close and is waiting for the broker to confirm it. A close only counts as confirmed when the position has left the open list **and** its closing deal is in the history. If that doesn't happen within 15 s, the state becomes `RECOVERY`. |
-| `RECOVERY` | Something is unexpected or unconfirmed. Nothing is opened. A reversal position keeps its opposite stop, its only exit. |
+| `RECOVERY` | Something is unexpected or unconfirmed. Nothing is opened. A reversal position keeps its trailing exit. |
 
 After a restart the EA always starts from `INITIALIZING` and decides from what
 the broker actually holds. The time of the last close is saved in wall-clock
 time, so the re-entry cooldown also holds across a restart.
 
-#### The reversal (trailing opposite stop)
+#### The reversal (trailing exit)
 
-A reversal position has **no stop loss**. Its exit is a real stop order for the
-opposite side, held by the broker, which trails behind price and only ever
-moves towards it. Gold at $2,000, a 300-point ($3) distance:
+A reversal position's exit is **one price, held by the broker twice**: as the
+position's own **stop loss**, which closes it, and as a **stop order for the
+opposite side** at the same price, which opens the reversal. A buy's stop loss
+and a sell stop both trigger on the bid, and a sell's stop loss and a buy stop
+both on the ask, so at the exit price the broker closes the old position and
+opens the new one **on the same tick**. Gold at $2,000, a 300-point ($3)
+distance:
 
-1. **BUY opens at 2000.** A **SELL STOP** is placed at 1997.
-2. **Price rises to 2010.** The SELL STOP moves up to 2007 (in steps of at
-   least `step_points`). It never moves down.
-3. **Price falls to 2007.** The SELL STOP fills — the broker does this, even
-   with the terminal offline. For a moment the account holds the BUY and the
-   new SELL.
-4. **`REVERSING`.** The EA sees the fill (`OnTradeTransaction`) and closes the
-   BUY at once. Close requests are retried every 2 s.
-5. **`SELL_ACTIVE`.** A **BUY STOP** is placed 300 points above the ask and
-   trails down. When it fills, the SELL is closed and the cycle repeats.
+1. **BUY opens at 2000**, already carrying a stop loss (attached to the order
+   that opened it). The exit is set at 1997: stop loss 1997 and a **SELL STOP**
+   at 1997.
+2. **Price rises to 2010.** Both move up to 2007 (in steps of at least
+   `step_points`). They never move down.
+3. **Price falls to 2007.** The broker closes the BUY at its stop loss and
+   fills the SELL STOP. Nothing waits for the EA: not a busy terminal, not a
+   slow platform call, not a terminal that is offline.
+4. **`SELL_ACTIVE`.** The SELL opened with its first stop loss attached. The EA
+   sets its exit (stop loss + **BUY STOP**) 300 points above the ask and trails
+   it down. When price reaches it, the cycle repeats.
 
-The log shows each step: `the BUY reverses to SELL if price reaches X`,
-`state BUY_ACTIVE -> REVERSING (SELL stop filled — closing BUY #…)`,
-`state REVERSING -> SELL_ACTIVE (reversal complete — …)`.
+The log shows each step: `the BUY reverses to SELL at X`,
+`CLOSED BUY position … by stop loss`, `FILLED SELL …`,
+`state BUY_ACTIVE -> SELL_ACTIVE (reversal — the broker closed #… at its stop loss)`.
 
-- **Terminal offline when the stop fills.** Both positions stay open. They are
-  the same size in opposite directions, so the loss stops growing until the EA
-  is back and closes the old one.
-- **Reversing not allowed at that moment** (strategy stopped, `AllowTrading`
-  off, EA halted, platform unreachable, risk halt): both positions are closed
-  and the strategy lands in `WAITING`. The order still did its job as the
-  position's exit. Stopping a strategy therefore does not close its position:
-  the opposite stop keeps trailing and closes it when price turns.
-- **The old side cannot be closed within 15 s.** The state becomes `RECOVERY`,
-  which closes every position except the newest.
+**Why the stop loss.** An earlier build gave the position no stop loss and
+relied on the EA to close it once it saw the opposite order fill. The close
+then waited on the EA: seconds when the terminal was busy (the EA's calls to
+the platform block it; a slow platform once delayed a close by 13 s), hours
+when the terminal was offline (both orders of a bracket filled and were only
+closed at the next start). With the stop loss, the close is the broker's.
+
+- **The fill arrives after the close.** The two are separate broker events. For
+  3 s after a close nothing is cancelled, so the opposite order can finish
+  filling; a position that appears in that time is the reversal.
+- **Both positions open at once** (a stop loss that could not be set in time,
+  e.g. inside the broker's freeze distance). The old way applies:
+  `REVERSING`, and the EA closes the old one at once, retrying every 2 s.
+- **Reversing not allowed** (strategy stopped, `AllowTrading` off, EA halted,
+  platform unreachable, risk halt): the stop order is withdrawn and the stop
+  loss alone keeps trailing, so the position exits flat at the same price.
+  Stopping a strategy therefore does not close its position. A reversal that
+  fills during a spread spike is closed as soon as it is seen.
+- **The old side cannot be closed within 15 s** (the `REVERSING` case). The
+  state becomes `RECOVERY`, which closes every position except the newest.
 - **Any other close** (take profit, manual close, stop-out, basket exit) is not
-  a reversal: the opposite stop is cancelled and the strategy goes back to
-  `WAITING`, with the cooldown and then a new bracket.
-- **A position with a stop loss from an earlier build** has it removed once
-  its opposite stop is in place.
-- A stop order fills at the price available. In a gap it fills beyond its
-  level, like a stop loss would.
+  a reversal: after the 3 s, the opposite stop is cancelled and the strategy
+  goes back to `WAITING`, with the cooldown and then a new bracket.
+- **A position without a stop loss from an earlier build** is given one at
+  its exit on the next pass.
+- A stop loss or stop order fills at the price available. In a gap it fills
+  beyond its level.
 
 #### The market guard (reversal)
 
@@ -381,16 +398,129 @@ weekend you can be filled well below the level shown.
 
 ## How the grid works
 
-- Level 1 opens at market when a basket is empty.
-- Each subsequent level opens only once price has moved a full
-  `grid_spacing_points` beyond the furthest existing entry in that direction.
-- Lot size per level is `initial_lot` (fixed mode) or
-  `initial_lot × multiplier^(level−1)` (multiplier mode), normalised to the
-  broker's volume step.
-- `direction: both` runs a buy basket and a sell basket independently. Each
-  closes on its own P/L; they do not net against each other. Position and
-  exposure ceilings apply across **both**.
-- Basket take profit / stop loss are in **account currency**, not points.
+The grid is a **ladder of pending stop orders closed together as one basket**,
+run in cycles. The design and its history are in `grid-strategy-plan.md` at
+the repo root; the code is `Include/GoldGrid/Cycle.mqh` (the cycle),
+`Include/GoldGrid/Grid.mqh` (the ladder and the combined basket) and the grid
+block of `GoldGrid.mq5`.
+
+### The settings
+
+| Platform field | EA | Meaning |
+| --- | --- | --- |
+| Gap between orders | `grid_spacing_points` | Distance between rungs, and from the market to the nearest rung. 200 points = $2.00 on XAUUSD |
+| Buy Stop orders | `grid_buy_orders` | Rungs above the market per cycle (0 = sell-only ladder) |
+| Sell Stop orders | `grid_sell_orders` | Rungs below the market per cycle (0 = buy-only ladder) |
+| Basket take profit | `basket_take_profit` | Account currency. The combined floating P/L — profit + swap + commission over every open position, both sides — at which the cycle ends |
+| Basket stop loss | `basket_stop_loss` | Optional, same measure, the loss at which the cycle ends |
+| Pause between cycles | `grid_cycle_pause_seconds` | Wall-clock seconds between a confirmed flat and the next ladder |
+| Lot size | `initial_lot` | Every rung, fixed |
+| Maximum positions | `max_positions` | Must be ≥ buy + sell. Resting rungs count towards it |
+
+### One cycle
+
+1. **PLACING.** The ladder is measured from one bid/ask — the *anchor*, taken
+   when the first rung is sent and fixed for the cycle. Buy Stop *n* rests at
+   `anchor ask + n × gap`, Sell Stop *n* at `anchor bid − n × gap`; rung 1 is
+   pushed just past the broker's minimum stop distance if the gap is inside
+   it. Rungs are placed nearest-first, buy and sell alternating, at most 10
+   requests per pass, so 60 orders take a few seconds and never flood the
+   broker. Every rung carries the comment `GG:<strategy id>:C<cycle>:L<rung>`.
+   A rung the market has already crossed is skipped and logged once; it is
+   placed later if price comes back to its side while the cycle is still
+   PLACING or ARMED, and never chased with a market order. A rung that has
+   filled is never put back within the cycle.
+2. **ARMED.** The ladder is complete. Nothing is placed; the basket is watched.
+   A rung found missing (deleted by hand, say) sends the cycle back to PLACING.
+3. **CLOSING.** The combined floating P/L reached the target (or the basket
+   stop loss). Every position is closed, *then* every order cancelled, on
+   every pass until the broker's history confirms each close and nothing of
+   ours is left. A rung that fills during the close is an open position on
+   the next pass and is closed too. One log line gives the realised result.
+   The closes are sent **all at once** (asynchronously), not one after
+   another: each close is a round trip to the broker (about 200 ms on the
+   demo server), so ten sent in turn took two seconds while the price moved.
+   Sent together they execute within roughly one round trip. The cancels go
+   the same way, right behind them, and one log line per pass says what went.
+   A close refused for a price reason (requote, price changed, off quotes)
+   is retried after 500 ms, up to three times; any other refusal keeps the
+   2 s pace, so a broker that keeps refusing is not hammered. Passes are 2 s
+   apart, so a close still executing is not sent twice. Rejections are
+   logged as `REJECTED by the broker`, throttled to one line per 5 s with a
+   count. A rung that fills during the close (its cancel arrived too late) is
+   closed the moment the fill is reported. If the broker sets the symbol to
+   **close-only**, the basket is still closed at its target or on a risk
+   halt; nothing new is placed until full trading returns. While the ladder
+   is being placed, the basket is checked between sends, so a rung that fills
+   mid-placement and takes the basket to its target is closed on the next
+   tick, not after the rest of the placement pass.
+4. **COOLDOWN.** The cycle number goes up by one. The pause is wall clock and
+   persisted, so a restart does not shorten it and a quiet market does not
+   stretch it. Then PLACING again, anchored at the new market.
+
+Fills are acted on at once (`OnTradeTransaction`), not on the next timer, so a
+target reached in a fast move is not missed. The monitor runs in every state
+but INITIALIZING and CLOSING — a basket at target closes from RECOVERY too.
+
+### Restarts
+
+The cycle number, anchor and pause deadline are persisted in terminal global
+variables `GoldGrid.<magic>.<symbol>.cycle.*`. On every start the EA goes
+through **INITIALIZING** and compares that record with the broker:
+
+| Broker | Record | Result |
+| --- | --- | --- |
+| Our orders or positions, with readable ladder comments | any | The cycle is **adopted from the broker** (number and anchor from the comments and prices; the broker wins over a disagreeing record) and completed — same tickets, no second ladder |
+| Ours, and the record says **CLOSING** | any | The close is resumed, not the ladder: the cycle's orders were already cancelled, part of its basket may be gone, and re-placing the ladder would run half a basket on indefinitely |
+| Ours, comments unreadable | has an anchor | Continued from the record |
+| Ours, comments unreadable | nothing | **RECOVERY**: orders of ours are withdrawn, positions are left to the monitor (closed at target), nothing is placed until nothing of ours remains |
+| Nothing of ours | pause remaining | COOLDOWN for the remainder |
+| Nothing of ours | a cycle was under way | It ended outside the EA (a risk halt, a manual close-all): the number is retired and the next cycle follows the pause |
+| Nothing of ours | first run | Cycle 1 |
+
+Duplicate protection: orders are sent from PLACING only, and the placing
+routine only ever sends rungs that neither rest nor have filled — a pass
+repeated in the same instant sends nothing twice. After a send nothing is
+concluded from the broker's lists for 2 s (live, they lag a send by up to a
+few hundred milliseconds). The rungs that have filled this cycle are kept as a
+set, fed by the fill transactions and rebuilt from the deal history on a
+restart, so a rung whose position was closed by hand is not placed again
+either. The ladder's shape (gap, counts, rung 1's offset) is snapshotted when
+the cycle anchors; a setting changed on the platform applies to the next
+cycle.
+
+### Gates and halts
+
+- **Risk gate** (`MayOpen`) before every rung: configuration fresh, strategy
+  running, Algo Trading and the session open, hedging account, maximum
+  positions and exposure (resting rungs count), drawdown, margin level. The
+  spread limit does not apply to resting orders — they fill later, at their
+  price. While the gate refuses, the ladder already resting stays, and the
+  rest is placed when it opens.
+- **Stopped on the platform:** resting rungs are **withdrawn** (each is a
+  future entry); the open basket keeps its target and is closed at it; no new
+  cycle starts until the strategy is started again. Then the same cycle
+  resumes if its basket is still open, or is retired and the next begins.
+- **Emergency stop and daily loss:** the cycle goes to CLOSING through the
+  same confirmed close, then waits in COOLDOWN until the halt clears (the next
+  trading day for the daily loss), then places a new ladder.
+- **Platform unreachable:** no new rungs; the resting ladder and the open
+  basket are managed from the last configuration.
+- **Market closed / daily break / weekend:** nothing is sent; orders and
+  positions are held by the broker and the basket exit resumes at the open.
+  The grid does not go flat before the break (`InpFlatBeforeBreakMinutes` is
+  reversal-only).
+- **Broker order limit** (`ACCOUNT_LIMIT_ORDERS`): a ladder larger than what
+  the limit leaves after other orders on the account is cut, nearest rungs
+  first, with one log line per cycle.
+
+### What the dashboard shows
+
+The report's `execution` block carries the state (`PLACING`, `ARMED`,
+`CLOSING`, `COOLDOWN`, `RECOVERY`), its reason, the cycle number, rungs
+resting and filled, the basket's floating P/L against its target, and the
+pause left in COOLDOWN. Each order and position reports its rung as
+`grid_level`.
 
 ---
 
@@ -420,6 +550,11 @@ summary.
 | `trailing` | Trailing category, both directions, with chaos |
 | `dailyloss` | Reversal with a $15 daily loss limit |
 | `spread` | Reversal with a 25-point spread limit (it gates the bracket's market checks, not the stop orders) |
+| `grid` | Grid: 30 Buy Stops / 30 Sell Stops 200 points apart, $2 combined target, 10 s pause, no interference |
+| `gridchaos` | The same ladder with a failure injected every ~20 minutes |
+| `gridrestart` | The same ladder with an EA restart every ~10 minutes, so every cycle state is resumed from the persisted record |
+| `gridlimit` | The same ladder with the broker pretending to allow 40 orders (`InpTestOrderLimit`) |
+| `griddailyloss` | The same ladder with a $15 daily loss limit |
 
 **Tester mode.** The tester can't reach the platform (`WebRequest` is
 unavailable there), so the strategy is built from the *Strategy Tester only*
@@ -435,10 +570,22 @@ following on every tick and prints `INVARIANT VIOLATION` for each breach:
    position always has exactly one stop order, on the opposite side, and none
    on its own side (5 s grace, trading session only).
 3. At most one stop per side, and no other order types.
-4. A stop never moves backwards: a trailing position's stop loss, or a
-   reversal position's opposite stop order. A reversal position never carries
-   a stop loss.
+4. A stop never moves backwards: a position's stop loss, or a reversal
+   position's opposite stop order. A reversal position always carries a stop
+   loss (5 s grace, trading session only).
 5. A manual close is never treated as a reversal.
+
+For a **grid** run the single-position checks do not apply; instead:
+1. No two orders of ours of the same type at the same price (5 s grace for a
+   chaos-injected stray).
+2. The cycle number only ever grows, and by one at a time.
+3. Never more positions + resting orders than `max_positions` (60 s repair
+   window for the chaos engine's injected position).
+4. No resting order from another cycle for more than 5 s.
+5. When CLOSING gives way to COOLDOWN, nothing of ours is open or resting.
+6. COOLDOWN lasts at least the configured pause.
+7. No rung — one side at one level; the buy and sell rungs of a level share
+   a comment — fills twice in one cycle.
 
 **The chaos engine** injects, on a seeded schedule:
 - a manual close (the "unexpected close")
@@ -449,7 +596,9 @@ following on every tick and prints `INVARIANT VIOLATION` for each breach:
 - a tick storm (the same tick handled 25 times)
 
 Each run ends with one line:
-`TEST SUMMARY | violations=… | max_positions=… | reversals=… | reversals_flat=… | max_overlap_ms=… | recoveries=… | chaos=… | net_profit=… | profit_factor=… | win_rate=… | max_drawdown_pct=… | market_change_pct=… | market_range=… | …`.
+`TEST SUMMARY | violations=… | max_positions=… | reversals=… | reversals_flat=… | max_overlap_ms=… | recoveries=… | chaos=… | net_profit=… | profit_factor=… | win_rate=… | max_drawdown_pct=… | market_change_pct=… | market_range=… | cycle=… | cycle_state=… | cycles_closed=… | cycle_recoveries=… | ladder_max_orders=… | ladder_requests=… | ladder_closed_profit=… | resting_orders=… | open_positions=… | …`.
+The `cycle*` and `ladder*` fields describe a grid run and read 0 / INITIALIZING
+for the other categories.
 
 **Month by month (`--monthly`).** This runs the reversal strategy separately
 for each calendar month (the broker's XAUUSD history starts on 23 Dec 2024).
@@ -507,6 +656,28 @@ these were deliberately forced entries and exits, not a strategy run.
       engineering a real loss
 - [ ] Behaviour across a weekend close / rollover — untested
 
+**Grid (ladder) checklist** — run 2026-10-06 on the MetaQuotes demo hedging
+account from the Docker platform, a 3 + 3 ladder (200 points, 0.01 lots,
+$0.30 target, 10 s pause) so a cycle completes in minutes:
+
+- [x] Ladder appears at 200-point gaps, nearest at ≥ the broker's stop level (6 orders within 1.3 s of the start; platform listed the same six with their levels)
+- [x] Only the rungs price reaches fill; the rest stay pending (sell rung 1 filled at exactly its price; the other five rested)
+- [x] Basket P/L on the platform equals the terminal's combined floating P/L (−1.23 on both)
+- [x] Target reached → all positions close, all orders cancel, the log shows the counts ("1 position(s) closed for 0.40, 5 order(s) cancelled")
+- [x] 10 s later a new ladder appears at the new market price, cycle + 1
+- [x] Terminal restart mid-cycle: same tickets after as before, no new orders ("cycle 1 adopted from the broker — 5 order(s) resting, 1 position(s) open, 1 rung(s) filled so far")
+- [x] Stopping the strategy: resting rungs withdrawn, no new cycle ("withdrew 6 resting ladder order(s)", 8 s after the stop)
+- [x] Emergency stop: the halt engages within seconds (nothing was open at the time)
+- [x] Broker order limit below 60 handled with one warning, not a rejection storm (`gridlimit` backtest: capacity 40 every cycle; not reproducible on the demo account, whose limit is above 60)
+- [ ] A week unattended with no invariant violation in the log
+
+Found during that run: a new strategy on a terminal inherits the day's
+realised result of the strategy that ran there before it (the magic number
+is the terminal's, not the strategy's), so the grid started under the
+reversal's daily-loss halt until its own limit was raised; and a filled stop
+order was shown as "cancelled" in the platform's order history (fixed — a
+vanished order whose ticket is now a position is "filled").
+
 ### Found during that run, and fixed
 
 * **Alert storm on a revoked token.** `Alert()` fired on every retry — a modal
@@ -555,9 +726,15 @@ matters most. That trade-off is a trading decision, not a code cleanup.
 
 ## Known limitations
 
-- **No pending orders.** Levels open at market when price reaches them, so the
-  `orders` array is always empty. Resting limit orders would fill during gaps
-  where this EA will not. This is a deliberate design choice, not an oversight.
+- **Stop orders fill where the broker fills them.** A grid rung or a reversal
+  bracket is a resting stop order: in a gap it fills at the first available
+  price past its level, which can be worse than the level. The combined basket
+  target is measured on the real fills, so the cycle is unaffected, but a
+  single rung can open further from the anchor than its gap.
+- **The grid's cycle record lives in the terminal** (global variables
+  `GoldGrid.<magic>.<symbol>.cycle.*`). Deleting them is safe — the next start
+  rebuilds the cycle from the orders and positions on the broker — but a
+  pause in progress is then forgotten.
 - **Drawdown is measured from peak equity, not from an all-time high.** The peak
   is stored in a terminal global variable (`GoldGrid.peak.<magic>.<symbol>`) so
   it survives removing and re-attaching the EA. After a deposit or withdrawal

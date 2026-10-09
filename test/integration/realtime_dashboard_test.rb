@@ -7,8 +7,8 @@ class RealtimeDashboardTest < ActionDispatch::IntegrationTest
   PASSWORD = "a-long-test-password".freeze
 
   VALID = {
-    name: "XAUUSD grid", direction: "both", grid_spacing_points: 150, grid_levels: 5,
-    initial_lot: 0.01, lot_mode: "fixed", max_positions: 10, max_exposure_lots: 0.5
+    name: "XAUUSD grid", direction: "both", grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5, basket_take_profit: 2,
+    initial_lot: 0.01, max_positions: 10, max_exposure_lots: 0.5
   }.freeze
 
   setup do
@@ -60,9 +60,48 @@ class RealtimeDashboardTest < ActionDispatch::IntegrationTest
   end
 
   test "a terminal report enqueues a dashboard broadcast" do
-    assert_enqueued_jobs 1, only: Turbo::Streams::ActionBroadcastJob do
+    # The dashboard's live region and the sidebar's connection badge.
+    assert_enqueued_jobs 2, only: Turbo::Streams::ActionBroadcastJob do
       report
     end
+  end
+
+  test "every report refreshes the sidebar badge, so an open page does not go stale on its own" do
+    perform_enqueued_jobs { report }
+
+    html = ApplicationController.render(partial: "shared/connection_badge", locals: { user: @user })
+
+    # The broadcast target, carrying the NEW report's time: the browser's
+    # freshness timer restarts from it instead of from the page load.
+    assert_match(/id="sidebar-connection-status"/, html)
+    assert_match(/data-connection-freshness-last-report-value="#{Regexp.escape(@user.terminal_connections.sole.last_report_at.utc.iso8601)}"/, html)
+    assert_match(/MT5 connected/, html)
+  end
+
+  test "every signed-in page subscribes to the account stream, not only the dashboard" do
+    post login_path, params: { email_address: @user.email_address, password: PASSWORD }
+    get strategies_path
+
+    assert_response :success
+    signed = css_select("turbo-cable-stream-source").map { |e| e["signed-stream-name"] }
+    assert_includes signed, Turbo::StreamsChannel.signed_stream_name([ @user, :dashboard ])
+    assert_select "#sidebar-connection-status", count: 1
+  end
+
+  test "a report refreshes its strategy's page, and that page subscribes and morphs" do
+    refreshed = []
+    stubbing(Turbo::StreamsChannel, :broadcast_refresh_later_to, ->(*streamables, **) { refreshed << streamables }) do
+      report
+    end
+    assert_equal [ [ @strategy, :live ] ], refreshed
+
+    post login_path, params: { email_address: @user.email_address, password: PASSWORD }
+    get strategy_path(@strategy)
+
+    signed = css_select("turbo-cable-stream-source").map { |e| e["signed-stream-name"] }
+    assert_includes signed, Turbo::StreamsChannel.signed_stream_name([ @strategy, :live ])
+    assert_select "meta[name='turbo-refresh-method'][content='morph']", count: 1
+    assert_select "meta[name='turbo-refresh-scroll'][content='preserve']", count: 1
   end
 
   test "the broadcast targets the live region and renders current figures" do
@@ -99,6 +138,18 @@ class RealtimeDashboardTest < ActionDispatch::IntegrationTest
     # Ingesting trading data must not depend on a browser being reachable.
     assert_response :accepted
     assert_equal 1, @strategy.positions.open.count
+  end
+
+  test "one failing broadcast does not stop the others" do
+    refreshed = []
+    stubbing(Turbo::StreamsChannel, :broadcast_replace_later_to, ->(*, **) { raise "queue down" }) do
+      stubbing(Turbo::StreamsChannel, :broadcast_refresh_later_to, ->(*streamables, **) { refreshed << streamables }) do
+        report
+      end
+    end
+
+    assert_response :accepted
+    assert_equal [ [ @strategy, :live ] ], refreshed, "the strategy page must still refresh"
   end
 
   test "the page carries what the browser needs to detect its own staleness" do

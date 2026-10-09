@@ -106,6 +106,13 @@ cp /rails/mt5/GoldGrid.mq5 "$TEMPLATE/MQL5/Experts/"
 cp /rails/mt5/Include/GoldGrid/*.mqh "$TEMPLATE/MQL5/Experts/Include/GoldGrid/"
 
 echo "Compiling GoldGrid.ex5 …"
+# The build being replaced is kept beside the new one, so a template that
+# turns out to misbehave can be put back without a recompile:
+#   mv GoldGrid.ex5.previous GoldGrid.ex5
+if [ -f "$TEMPLATE/MQL5/Experts/GoldGrid.ex5" ]; then
+  cp -f "$TEMPLATE/MQL5/Experts/GoldGrid.ex5" "$TEMPLATE/MQL5/Experts/GoldGrid.ex5.previous"
+  echo "Previous build kept as GoldGrid.ex5.previous"
+fi
 rm -f "$TEMPLATE/MQL5/Experts/GoldGrid.ex5" "$TEMPLATE/MQL5/Experts/GoldGrid.log"
 # MetaEditor's /compile: flag silently does nothing when the path contains a
 # space, and the terminal lives under "Program Files". Run from MQL5 and pass

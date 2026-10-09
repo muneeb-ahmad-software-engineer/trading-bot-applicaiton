@@ -1,8 +1,12 @@
 <%#
-  What the Expert Advisor reports it is doing: its execution state, why it is
-  in it, the price the next reversal happens at, and today's P/L against the
-  daily loss limit. Only shown for a terminal that is reporting a state —
-  a grid strategy, or an EA older than the state machine, reports none.
+  What the Expert Advisor reports it is doing: its execution state and why it
+  is in it, then the figures that state turns on. A trailing or reversal EA
+  reports the price its next reversal happens at; a grid EA reports its cycle
+  number, how many ladder rungs rest and have filled, the basket's floating
+  P/L against its target, and the pause left between cycles. Today's P/L
+  against the daily loss limit and any risk halt apply to every category.
+  Only shown for a terminal that is reporting a state — an EA older than the
+  state machine reports none.
 
   connection: the strategy's terminal connection
   strategy: the strategy
@@ -28,6 +32,38 @@
           <dd class="figure-sm"><%= number_with_precision(connection.reversal_level, precision: 2) %></dd>
         </div>
       <% end %>
+
+      <% if connection.cycle_number.present? %>
+        <div class="flex items-center justify-between gap-4">
+          <dt class="body-sm">Cycle</dt>
+          <dd class="figure-sm"><%= connection.cycle_number %></dd>
+        </div>
+        <div class="flex items-center justify-between gap-4">
+          <dt class="body-sm">Ladder</dt>
+          <dd class="figure-sm">
+            <%= connection.filled_orders.to_i %> filled
+            <span class="caption">· <%= connection.resting_orders.to_i %> resting</span>
+          </dd>
+        </div>
+        <% unless connection.basket_profit.nil? %>
+          <div class="flex items-center justify-between gap-4">
+            <dt class="body-sm">Basket P/L</dt>
+            <dd class="figure-sm <%= profit_tone(connection.basket_profit) %>">
+              <%= signed_money(connection.basket_profit) %>
+              <% if strategy.basket_take_profit %>
+                <span class="caption">of <%= number_with_precision(strategy.basket_take_profit, precision: 2) %> target</span>
+              <% end %>
+            </dd>
+          </div>
+        <% end %>
+        <% if connection.execution_state == "COOLDOWN" && connection.pause_seconds_left.present? %>
+          <div class="flex items-center justify-between gap-4">
+            <dt class="body-sm">Next cycle in</dt>
+            <dd class="figure-sm"><%= pluralize(connection.pause_seconds_left, "second") %></dd>
+          </div>
+        <% end %>
+      <% end %>
+
       <% unless connection.daily_profit.nil? %>
         <div class="flex items-center justify-between gap-4">
           <dt class="body-sm">Today's P/L</dt>

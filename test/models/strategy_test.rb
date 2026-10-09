@@ -15,8 +15,8 @@ class StrategyTest < ActiveSupport::TestCase
   def build(**overrides)
     @user.strategies.new({
       name: "XAUUSD grid", direction: "both",
-      grid_spacing_points: 150, grid_levels: 5,
-      initial_lot: 0.01, lot_mode: "fixed",
+      grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5, basket_take_profit: 2,
+      initial_lot: 0.01,
       max_positions: 10, max_exposure_lots: 0.5
     }.merge(overrides))
   end
@@ -73,15 +73,14 @@ class StrategyTest < ActiveSupport::TestCase
     # assignment, which a controller would surface as a 500 rather than a form
     # error.
     assert_invalid build(status: "bogus"), :status
-    assert_invalid build(direction: "sideways"), :direction
-    assert_invalid build(lot_mode: "martingale"), :lot_mode
+    assert_invalid build_trailing(direction: "sideways"), :direction
   end
 
   # ------------------------------------------------------------- Grid setup
 
-  test "rejects non-positive grid spacing, levels and lot size" do
+  test "rejects non-positive grid spacing, an empty ladder and a non-positive lot size" do
     assert_not build(grid_spacing_points: 0).valid?
-    assert_not build(grid_levels: 0).valid?
+    assert_not build(grid_buy_orders: 0, grid_sell_orders: 0).valid?
     assert_not build(initial_lot: 0).valid?
     assert_not build(initial_lot: -1).valid?
   end
@@ -101,20 +100,49 @@ class StrategyTest < ActiveSupport::TestCase
     assert_invalid build(grid_spacing_points: 150.5), :grid_spacing_points
   end
 
-  test "grid levels are bounded on both sides" do
-    assert_invalid build(grid_levels: 0), :grid_levels
-    assert_valid build(grid_levels: 1)
-    assert_valid build(grid_levels: 200, max_positions: 500, max_exposure_lots: 2)
-    assert_invalid build(grid_levels: 201, max_positions: 500, max_exposure_lots: 3), :grid_levels
-    assert_invalid build(grid_levels: nil), :grid_levels
-    assert_invalid build(grid_levels: 5.5), :grid_levels
+  test "ladder order counts are bounded on both sides" do
+    assert_invalid build(grid_buy_orders: -1), :grid_buy_orders
+    assert_invalid build(grid_sell_orders: -1), :grid_sell_orders
+    assert_valid build(grid_buy_orders: 0)
+    assert_valid build(grid_sell_orders: 0)
+    assert_valid build(grid_buy_orders: 500, grid_sell_orders: 0, max_positions: 500, max_exposure_lots: 5)
+    assert_invalid build(grid_buy_orders: 501, grid_sell_orders: 0, max_positions: 500, max_exposure_lots: 6), :grid_buy_orders
+    assert_invalid build(grid_buy_orders: nil), :grid_buy_orders
+    assert_invalid build(grid_sell_orders: nil), :grid_sell_orders
+    assert_invalid build(grid_buy_orders: 5.5), :grid_buy_orders
+  end
+
+  test "a ladder with no orders on either side is refused" do
+    strategy = build(grid_buy_orders: 0, grid_sell_orders: 0)
+
+    assert_invalid strategy, :grid_buy_orders
+    assert_match(/cannot both be zero/, strategy.errors[:grid_buy_orders].to_sentence)
+  end
+
+  test "a one-sided ladder is allowed" do
+    assert_valid build(grid_buy_orders: 10, grid_sell_orders: 0)
+    assert_valid build(grid_buy_orders: 0, grid_sell_orders: 10)
+  end
+
+  test "the pause between cycles is bounded on both sides" do
+    assert_invalid build(grid_cycle_pause_seconds: 0), :grid_cycle_pause_seconds
+    assert_valid build(grid_cycle_pause_seconds: 1)
+    assert_valid build(grid_cycle_pause_seconds: 3_600)
+    assert_invalid build(grid_cycle_pause_seconds: 3_601), :grid_cycle_pause_seconds
+    assert_invalid build(grid_cycle_pause_seconds: nil), :grid_cycle_pause_seconds
+    assert_invalid build(grid_cycle_pause_seconds: 2.5), :grid_cycle_pause_seconds
+  end
+
+  test "a grid must have a basket take profit, its only exit" do
+    assert_invalid build(basket_take_profit: nil), :basket_take_profit
+    assert_valid build(basket_take_profit: 0.01)
   end
 
   test "initial lot is bounded on both sides" do
     assert_invalid build(initial_lot: 0), :initial_lot
     assert_invalid build(initial_lot: -0.01), :initial_lot
-    assert_valid build(initial_lot: 100, grid_levels: 1, max_positions: 1, max_exposure_lots: 100)
-    assert_invalid build(initial_lot: 100.01, grid_levels: 1, max_positions: 1, max_exposure_lots: 1000), :initial_lot
+    assert_valid build(initial_lot: 100, grid_buy_orders: 1, grid_sell_orders: 0, max_positions: 1, max_exposure_lots: 100)
+    assert_invalid build(initial_lot: 100.01, grid_buy_orders: 1, grid_sell_orders: 0, max_positions: 1, max_exposure_lots: 1000), :initial_lot
     assert_invalid build(initial_lot: nil), :initial_lot
   end
 
@@ -127,35 +155,11 @@ class StrategyTest < ActiveSupport::TestCase
     assert_invalid strategy, :initial_lot
   end
 
-  # ----------------------------------------------------------- Lot multiplier
-
-  test "multiplier mode requires a multiplier of at least one" do
-    assert_not build(lot_mode: "multiplier", lot_multiplier: nil).valid?
-    assert_not build(lot_mode: "multiplier", lot_multiplier: 0.5).valid?
-  end
-
-  test "the multiplier is bounded between one and ten" do
-    assert_invalid build(lot_mode: "multiplier", lot_multiplier: 0.99), :lot_multiplier
-    assert_valid build(lot_mode: "multiplier", lot_multiplier: 1)
-    assert_valid build(lot_mode: "multiplier", lot_multiplier: 10, max_exposure_lots: 200)
-    assert_invalid build(lot_mode: "multiplier", lot_multiplier: 10.01, max_exposure_lots: 200), :lot_multiplier
-  end
-
-  test "a multiplier is ignored entirely in fixed mode" do
-    # The validation is conditional on the mode. A leftover multiplier from a
-    # user who switched back to fixed must not block the save, and must not
-    # change the arithmetic.
-    strategy = build(lot_mode: "fixed", lot_multiplier: 99)
-
-    assert_valid strategy
-    assert_equal BigDecimal("0.05"), strategy.maximum_theoretical_lots
-  end
-
   # --------------------------------------------------------- Risk controls
 
   test "maximum positions is bounded on both sides" do
     assert_invalid build(max_positions: 0), :max_positions
-    assert_valid build(max_positions: 1, grid_levels: 1)
+    assert_valid build(max_positions: 1, grid_buy_orders: 1, grid_sell_orders: 0)
     assert_valid build(max_positions: 500)
     assert_invalid build(max_positions: 501), :max_positions
     assert_invalid build(max_positions: nil), :max_positions
@@ -168,8 +172,9 @@ class StrategyTest < ActiveSupport::TestCase
     assert_invalid build(max_exposure_lots: nil), :max_exposure_lots
   end
 
-  test "basket targets are optional but must be positive when given" do
-    assert_valid build(basket_take_profit: nil, basket_stop_loss: nil)
+  test "basket targets must be positive when given, and the stop loss stays optional" do
+    assert_valid build(basket_stop_loss: nil)
+    assert_valid build_trailing(basket_take_profit: nil, basket_stop_loss: nil)
     assert_valid build(basket_take_profit: 0.01, basket_stop_loss: 0.01)
     assert_invalid build(basket_take_profit: 0), :basket_take_profit
     assert_invalid build(basket_take_profit: -1), :basket_take_profit
@@ -199,143 +204,98 @@ class StrategyTest < ActiveSupport::TestCase
     assert_invalid build(max_spread_points: 10.5), :max_spread_points
   end
 
-  # ------------------------------------------ Grid levels vs max positions
+  # ------------------------------------------- Ladder size vs max positions
 
-  test "grid levels cannot exceed maximum positions" do
-    strategy = build(grid_levels: 20, max_positions: 10, max_exposure_lots: 100)
+  test "the ladder cannot exceed maximum positions" do
+    strategy = build(grid_buy_orders: 10, grid_sell_orders: 10, max_positions: 10, max_exposure_lots: 100)
 
     assert_not strategy.valid?
-    assert_match(/cannot exceed maximum positions/, strategy.errors[:grid_levels].to_sentence)
+    assert_match(/cannot exceed maximum positions/, strategy.errors[:grid_buy_orders].to_sentence)
   end
 
-  test "a grid that exactly fills the position ceiling is allowed" do
-    assert_valid build(grid_levels: 10, max_positions: 10, max_exposure_lots: 1)
+  test "a ladder that exactly fills the position ceiling is allowed" do
+    assert_valid build(grid_buy_orders: 5, grid_sell_orders: 5, max_positions: 10, max_exposure_lots: 1)
   end
 
-  test "the message names the ceiling the user actually configured" do
-    strategy = build(grid_levels: 20, max_positions: 12, max_exposure_lots: 100)
+  test "the message names the ladder and the ceiling the user actually configured" do
+    strategy = build(grid_buy_orders: 10, grid_sell_orders: 10, max_positions: 12, max_exposure_lots: 100)
     strategy.valid?
+    message = strategy.errors[:grid_buy_orders].to_sentence
 
-    assert_match(/\(12\)/, strategy.errors[:grid_levels].to_sentence)
+    assert_match(/\(20\)/, message)
+    assert_match(/\(12\)/, message)
   end
 
-  test "the levels-versus-positions check stays quiet when either value is missing" do
+  test "the ladder message uses the form's field names and says what would pass" do
+    strategy = build(grid_buy_orders: 4, grid_sell_orders: 5, max_positions: 6, initial_lot: 0.01, max_exposure_lots: 0.06)
+    strategy.valid?
+    messages = strategy.errors.full_messages.join(" | ")
+
+    assert_match(/^Buy Stop orders plus Sell Stop orders \(9\) cannot exceed maximum positions \(6\)/, messages)
+    assert_match(/Raise Maximum positions to at least 9/, messages)
+    assert_match(/Maximum exposure \(lots\) is below what this grid can open \(0\.09 lots: 9 orders of 0\.01 lots\)/, messages)
+    assert_match(/Raise it to at least 0\.09/, messages)
+    assert_no_match(/Grid buy orders/, messages)
+  end
+
+  test "the ladder-versus-positions check stays quiet when a value is missing" do
     # Otherwise a blank form reports "cannot exceed maximum positions" on top of
     # the presence errors, which reads as a contradiction.
-    strategy = build(grid_levels: nil, max_positions: nil)
+    strategy = build(grid_buy_orders: nil, max_positions: nil)
     strategy.valid?
 
-    assert_no_match(/cannot exceed maximum positions/, strategy.errors[:grid_levels].to_sentence)
+    assert_no_match(/cannot exceed maximum positions/, strategy.errors[:grid_buy_orders].to_sentence)
   end
 
-  # -------------------------------------------- Exposure versus the grid
+  # ------------------------------------------ Exposure versus the ladder
 
-  test "exposure ceiling must accommodate the grid it is paired with" do
-    # 10 levels of 0.10 lots = 1.0 lots, above a 0.5 ceiling.
-    strategy = build(grid_levels: 10, initial_lot: 0.10, max_positions: 10, max_exposure_lots: 0.5)
+  test "exposure ceiling must accommodate the ladder it is paired with" do
+    # 10 orders of 0.10 lots = 1.0 lots, above a 0.5 ceiling.
+    strategy = build(grid_buy_orders: 5, grid_sell_orders: 5, initial_lot: 0.10, max_positions: 10, max_exposure_lots: 0.5)
 
     assert_not strategy.valid?
     assert_match(/below what this grid can open/, strategy.errors[:max_exposure_lots].to_sentence)
   end
 
-  test "a grid that exactly reaches its exposure ceiling is allowed" do
-    # 5 levels of 0.01 is exactly 0.05. The ceiling is a limit, not a barrier
-    # the grid must stay strictly under.
-    assert_valid build(grid_levels: 5, initial_lot: 0.01, max_exposure_lots: 0.05)
+  test "a ladder that exactly reaches its exposure ceiling is allowed" do
+    # 5 orders of 0.01 is exactly 0.05. The ceiling is a limit, not a barrier
+    # the ladder must stay strictly under.
+    assert_valid build(grid_buy_orders: 3, grid_sell_orders: 2, initial_lot: 0.01, max_exposure_lots: 0.05)
   end
 
-  test "a compounding grid is measured against its geometric total, not its levels" do
-    # 0.01 * (1 + 2 + 4 + 8 + 16) = 0.31
-    assert_invalid build(lot_mode: "multiplier", lot_multiplier: 2, grid_levels: 5,
-                         initial_lot: 0.01, max_exposure_lots: 0.30), :max_exposure_lots
-    assert_valid build(lot_mode: "multiplier", lot_multiplier: 2, grid_levels: 5,
-                       initial_lot: 0.01, max_exposure_lots: 0.31)
-  end
-
-  test "an unusable multiplier reports one error, not two" do
+  test "a missing order count reports one error, not two" do
     # The exposure check returns early rather than computing a total from a
-    # multiplier it knows is missing. The user gets "multiplier is not a number"
-    # and fixes one thing.
-    strategy = build(lot_mode: "multiplier", lot_multiplier: nil, max_exposure_lots: 0.01)
+    # ladder it knows is incomplete. The user gets "is not a number" and fixes
+    # one thing.
+    strategy = build(grid_buy_orders: nil, max_exposure_lots: 0.01)
     strategy.valid?
 
-    assert_predicate strategy.errors[:lot_multiplier], :any?
+    assert_predicate strategy.errors[:grid_buy_orders], :any?
     assert_empty strategy.errors[:max_exposure_lots]
   end
 
-  test "an unreachable total is described in words rather than printed in full" do
-    # A 200-level grid doubling each step reaches a 59-digit number. Printed
-    # verbatim it fills the form with numerals and tells the user nothing.
-    strategy = build(lot_mode: "multiplier", lot_multiplier: 2, grid_levels: 200,
-                     max_positions: 500, max_exposure_lots: 1_000)
-    strategy.valid?
-    message = strategy.errors[:max_exposure_lots].to_sentence
-
-    assert_match(/more than 1,000,000 lots/, message)
-    assert_operator message.length, :<, 200, "the error message must stay readable"
-  end
-
-  test "an ordinary total is printed exactly, with separators" do
-    strategy = build(lot_mode: "multiplier", lot_multiplier: 10, grid_levels: 10,
+  test "the total in the message is printed with separators" do
+    strategy = build(grid_buy_orders: 500, grid_sell_orders: 0, initial_lot: 100,
                      max_positions: 500, max_exposure_lots: 1_000)
     strategy.valid?
 
-    # 0.01 * (10^10 - 1) / 9 = 11,111,111.11 — above the display ceiling.
-    assert_match(/more than/, strategy.errors[:max_exposure_lots].to_sentence)
+    assert_match(/50,000/, strategy.errors[:max_exposure_lots].to_sentence)
   end
 
   # --------------------------------------------- maximum_theoretical_lots
 
-  test "maximum theoretical lots is linear in fixed mode" do
-    strategy = build(grid_levels: 5, initial_lot: 0.02, lot_mode: "fixed")
+  test "maximum theoretical lots is the lot on every ladder order" do
+    strategy = build(grid_buy_orders: 3, grid_sell_orders: 2, initial_lot: 0.02)
 
     assert_equal 0.10.to_d, strategy.maximum_theoretical_lots
   end
 
-  test "maximum theoretical lots compounds in multiplier mode" do
-    # 0.01 * (1 + 2 + 4 + 8) = 0.15
-    strategy = build(grid_levels: 4, initial_lot: 0.01, lot_mode: "multiplier", lot_multiplier: 2)
-
-    assert_equal 0.15.to_d, strategy.maximum_theoretical_lots
-  end
-
-  test "a multiplier of exactly one does not divide by zero" do
-    # The geometric series is a(rⁿ − 1)/(r − 1), which is undefined at r = 1.
-    # A multiplier of 1 is a legal configuration meaning "do not scale up", so
-    # this is a reachable input, not a theoretical one.
-    strategy = build(lot_mode: "multiplier", lot_multiplier: 1, grid_levels: 5, initial_lot: 0.01)
-
-    assert_nothing_raised { strategy.maximum_theoretical_lots }
-    assert_equal BigDecimal("0.05"), strategy.maximum_theoretical_lots
-    assert_valid strategy
-  end
-
-  test "multiplier mode with no multiplier falls back to the linear total" do
-    # Reached while a form is half-filled. It must not raise on the way to
-    # reporting that the multiplier is missing.
-    strategy = build(lot_mode: "multiplier", lot_multiplier: nil, grid_levels: 5, initial_lot: 0.01)
-
-    assert_nothing_raised { strategy.maximum_theoretical_lots }
-    assert_equal BigDecimal("0.05"), strategy.maximum_theoretical_lots
-  end
-
-  test "a single-level grid can only ever open its initial lot" do
-    assert_equal BigDecimal("0.01"), build(grid_levels: 1, initial_lot: 0.01).maximum_theoretical_lots
-    assert_equal BigDecimal("0.01"),
-                 build(grid_levels: 1, initial_lot: 0.01, lot_mode: "multiplier",
-                       lot_multiplier: 2, max_positions: 1).maximum_theoretical_lots
-  end
-
-  test "the total is rounded to broker lot precision" do
-    # 0.03 * (1 + 1.5 + 2.25) = 0.1425, which no broker can accept as-is.
-    strategy = build(initial_lot: 0.03, lot_mode: "multiplier", lot_multiplier: 1.5,
-                     grid_levels: 3, max_exposure_lots: 1)
-
-    assert_equal BigDecimal("0.14"), strategy.maximum_theoretical_lots
+  test "a one-order ladder can only ever open its lot" do
+    assert_equal BigDecimal("0.01"), build(grid_buy_orders: 1, grid_sell_orders: 0, initial_lot: 0.01).maximum_theoretical_lots
   end
 
   test "lot amounts use decimal arithmetic, not floats" do
-    strategy = build(initial_lot: 0.01, grid_levels: 3)
+    strategy = build(initial_lot: 0.01, grid_buy_orders: 2, grid_sell_orders: 1)
     strategy.save!
 
     assert_kind_of BigDecimal, strategy.reload.initial_lot
@@ -358,7 +318,7 @@ class StrategyTest < ActiveSupport::TestCase
     strategy.save!
     strategy.start!
 
-    assert strategy.update(grid_levels: 6), strategy.errors.full_messages.to_sentence
+    assert strategy.update(grid_buy_orders: 4), strategy.errors.full_messages.to_sentence
     assert_not strategy.update(category: "trailing", trailing_stop_points: 300, trailing_step_points: 50)
     assert_includes strategy.errors[:category], "cannot change while the strategy is running. Stop it first"
 
@@ -369,7 +329,7 @@ class StrategyTest < ActiveSupport::TestCase
 
   test "starting requires a verified user" do
     strategy = users(:unverified).strategies.create!(
-      name: "g", grid_spacing_points: 150, grid_levels: 5, initial_lot: 0.01,
+      name: "g", grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5, basket_take_profit: 2, initial_lot: 0.01,
       max_positions: 10, max_exposure_lots: 0.5
     )
 
@@ -450,7 +410,7 @@ class StrategyTest < ActiveSupport::TestCase
     other = users(:unverified)
     other.verify!
     theirs = other.strategies.create!(
-      name: "theirs", grid_spacing_points: 150, grid_levels: 5, initial_lot: 0.01,
+      name: "theirs", grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5, basket_take_profit: 2, initial_lot: 0.01,
       max_positions: 10, max_exposure_lots: 0.5
     )
 
@@ -490,7 +450,7 @@ class StrategyTest < ActiveSupport::TestCase
     # real money at a broker.
     user = users(:unverified)
     strategy = user.strategies.create!(
-      name: "g", grid_spacing_points: 150, grid_levels: 5, initial_lot: 0.01,
+      name: "g", grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5, basket_take_profit: 2, initial_lot: 0.01,
       max_positions: 10, max_exposure_lots: 0.5
     )
     strategy.update_column(:status, "running")
@@ -542,9 +502,10 @@ class StrategyTest < ActiveSupport::TestCase
     assert_valid strategy
   end
 
-  test "a grid still requires its spacing and levels" do
+  test "a grid still requires its spacing and both order counts" do
     assert_invalid build(grid_spacing_points: nil), :grid_spacing_points
-    assert_invalid build(grid_levels: nil), :grid_levels
+    assert_invalid build(grid_buy_orders: nil), :grid_buy_orders
+    assert_invalid build(grid_sell_orders: nil), :grid_sell_orders
   end
 
   # The database carries the same rule, so a row that skips the model cannot
@@ -554,7 +515,7 @@ class StrategyTest < ActiveSupport::TestCase
     strategy.save!
 
     assert_raises ActiveRecord::StatementInvalid do
-      strategy.update_column(:grid_levels, nil)
+      strategy.update_column(:grid_buy_orders, nil)
     end
   end
 
@@ -569,12 +530,20 @@ class StrategyTest < ActiveSupport::TestCase
 
   # ------------------------------------------------------------ Trailing stop
 
-  test "a grid may carry a trailing stop without becoming a trailing strategy" do
-    strategy = build(trailing_stop_points: 200)
+  # The form hides these fields for a grid, so a value left over from another
+  # category can never be corrected there. It is dropped instead of refused.
+  test "a grid drops the trailing settings and direction it would never apply" do
+    strategy = build(trailing_stop_points: 200, trailing_activation_points: 50,
+                     trailing_step_points: 10, entry_distance_points: 100, direction: "buy")
 
     assert_valid strategy
     assert_predicate strategy, :category_grid?
-    assert_predicate strategy, :trailing_enabled?
+    assert_not strategy.trailing_enabled?
+    assert_nil strategy.trailing_stop_points
+    assert_nil strategy.trailing_activation_points
+    assert_nil strategy.trailing_step_points
+    assert_nil strategy.entry_distance_points
+    assert_predicate strategy, :direction_both?
   end
 
   test "a strategy with no trailing distance is not trailing anything" do
@@ -582,48 +551,48 @@ class StrategyTest < ActiveSupport::TestCase
   end
 
   test "trailing distance boundaries" do
-    assert_invalid build(trailing_stop_points: 0), :trailing_stop_points
-    assert_invalid build(trailing_stop_points: -1), :trailing_stop_points
-    assert_valid build(trailing_stop_points: 1)
-    assert_valid build(trailing_stop_points: 100_000)
-    assert_invalid build(trailing_stop_points: 100_001), :trailing_stop_points
+    assert_invalid build_trailing(trailing_stop_points: 0), :trailing_stop_points
+    assert_invalid build_trailing(trailing_stop_points: -1), :trailing_stop_points
+    assert_valid build_trailing(trailing_stop_points: 1)
+    assert_valid build_trailing(trailing_stop_points: 100_000)
+    assert_invalid build_trailing(trailing_stop_points: 100_001), :trailing_stop_points
   end
 
   test "an activation or a step with nothing to trail is rejected rather than ignored" do
     # Silently accepting these is the worst outcome: the user leaves the form
     # believing they configured an exit that does not exist.
-    assert_invalid build(trailing_activation_points: 500), :trailing_activation_points
-    assert_invalid build(trailing_step_points: 20), :trailing_step_points
+    assert_invalid build_trailing(trailing_stop_points: nil, trailing_activation_points: 500), :trailing_activation_points
+    assert_invalid build_trailing(trailing_stop_points: nil, trailing_step_points: 20), :trailing_step_points
   end
 
   test "a distance is never stored without a step" do
-    strategy = build(trailing_stop_points: 200)
+    strategy = build_trailing(trailing_stop_points: 200)
     strategy.validate
 
     assert_equal Strategy::TRAILING_STEP_DEFAULT_POINTS, strategy.trailing_step_points
   end
 
   test "the default step is clamped to a distance tighter than itself" do
-    strategy = build(trailing_stop_points: 3)
+    strategy = build_trailing(trailing_stop_points: 3)
     strategy.validate
 
     assert_equal 3, strategy.trailing_step_points
   end
 
   test "an explicit step is left alone" do
-    strategy = build(trailing_stop_points: 200, trailing_step_points: 50)
+    strategy = build_trailing(trailing_stop_points: 200, trailing_step_points: 50)
     strategy.validate
 
     assert_equal 50, strategy.trailing_step_points
   end
 
   test "a step wider than the distance would freeze the stop, so it is rejected" do
-    assert_invalid build(trailing_stop_points: 200, trailing_step_points: 201), :trailing_step_points
-    assert_valid build(trailing_stop_points: 200, trailing_step_points: 200)
+    assert_invalid build_trailing(trailing_stop_points: 200, trailing_step_points: 201), :trailing_step_points
+    assert_valid build_trailing(trailing_stop_points: 200, trailing_step_points: 200)
   end
 
   test "points are restated as the dollar distance they were entered as" do
-    strategy = build(trailing_stop_points: 200, trailing_activation_points: 1_000,
+    strategy = build_trailing(trailing_stop_points: 200, trailing_activation_points: 1_000,
                      trailing_step_points: 25)
 
     assert_equal BigDecimal("2.00"), strategy.trailing_stop_price
@@ -723,8 +692,8 @@ class StrategyTest < ActiveSupport::TestCase
   end
 
   test "the level ceiling does not apply to a strategy with no levels" do
-    # max_positions below grid_levels rejects a grid. A trailing strategy has
-    # no levels for that rule to compare against.
+    # max_positions below the ladder size rejects a grid. A trailing strategy
+    # has no ladder for that rule to compare against.
     assert_valid build_trailing(max_positions: 1)
   end
 

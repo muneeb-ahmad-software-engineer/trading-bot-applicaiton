@@ -10,35 +10,40 @@ en:
       It has no effect on trading.
     category: >-
       How the robot trades.
-      Grid: opens more trades as the price moves against you, hoping to recover on the bounce back.
+      Grid: places a ladder of pending orders above and below the price, lets the market
+      trigger whichever it reaches, and closes all the open trades together once their
+      combined profit reaches your target — then starts again.
       Trailing: one trade at a time, with a stop that follows the price to lock in profit.
       Reversal: always holds one trade, and flips from buy to sell (or back) when the price turns against it.
     direction: >-
       Which way the robot may trade. Buy makes money when gold goes up; sell
       makes money when gold goes down. Both lets it do either. A reversal
-      strategy needs both, because it switches between them.
+      strategy needs both, because it switches between them. A grid ignores
+      this: its Buy Stop and Sell Stop counts decide its sides.
     symbol: >-
       What is being traded. XAUUSD is gold priced in US dollars — the only
       market this platform supports.
     initial_lot: >-
       How big each trade is. 0.01 lot is 1 ounce of gold (about $4,300 worth),
       and every $1 the gold price moves is $1 of profit or loss for you. 0.10
-      lot is 10 ounces, so $10 per $1 move. Start with 0.01 while you learn.
-    lot_mode: >-
-      Grid only. Fixed: every extra trade is the same size as the first.
-      Multiplier: each extra trade is bigger than the one before, which recovers
-      faster but can lose much more.
-    lot_multiplier: >-
-      Grid only, in multiplier mode. How much bigger each extra trade is. With 2,
-      the trades go 0.01, 0.02, 0.04, 0.08… — sizes double quickly, and so does
-      the risk.
+      lot is 10 ounces, so $10 per $1 move. On a grid every order in the ladder
+      is this size. Start with 0.01 while you learn.
     grid_spacing_points: >-
-      Grid only. How far the price must move against you before the next trade
-      opens. 100 points = $1 on gold, so 300 points means a new trade every $3.
-    grid_levels: >-
-      Grid only. The most trades the grid may open in one direction. More levels
-      mean more trades — and more money at risk — if the price keeps going the
-      wrong way.
+      Grid only. The gap from the current price to the first pending order, and
+      from each order to the next. 100 points = $1 on gold, so 200 points puts
+      an order every $2.
+    grid_buy_orders: >-
+      Grid only. How many Buy Stop orders the ladder places above the price
+      each cycle. They only become trades if the price rises to them. 0 means
+      no buy side.
+    grid_sell_orders: >-
+      Grid only. How many Sell Stop orders the ladder places below the price
+      each cycle. They only become trades if the price falls to them. 0 means
+      no sell side. Buy and sell orders together cannot exceed maximum positions.
+    grid_cycle_pause_seconds: >-
+      Grid only. After the open trades close at the basket take profit and the
+      remaining pending orders are cancelled, the robot waits this many seconds
+      before placing a fresh ladder around the new price.
     trailing_stop_points: >-
       The most profit you are willing to give back, and the most a new trade can
       lose. 100 points = $1 on gold. With 300 points: a buy opened at $4,300
@@ -68,15 +73,17 @@ en:
       daily limit.
     basket_take_profit: >-
       Close all open trades together once their combined profit reaches this
-      many dollars. Example: 20 closes everything at $20 profit. Leave empty for
-      no limit.
+      many dollars. Example: 2 closes everything at $2 profit, whether one trade
+      or thirty are open. Required for a grid — it is the ladder's only exit.
+      Leave empty on other strategies for no limit.
     basket_stop_loss: >-
       Close all open trades together once their combined loss reaches this many
       dollars. Example: 50 closes everything at a $50 loss. Leave empty for no
       limit.
     max_positions: >-
       The most trades the robot may have open at the same time. A safety limit —
-      it will not open more, whatever the strategy wants.
+      it will not open more, whatever the strategy wants. On a grid it also caps
+      the ladder: Buy Stop plus Sell Stop orders cannot exceed it.
     max_exposure_lots: >-
       The most gold, in lots, the robot may hold in total across all open trades.
       0.10 means at most 10 ounces at once. Must be at least as big as the

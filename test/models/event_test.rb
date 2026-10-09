@@ -5,7 +5,7 @@ class EventTest < ActiveSupport::TestCase
 
   test "records an action against a user and subject" do
     strategy = @user.strategies.create!(
-      name: "g", grid_spacing_points: 150, grid_levels: 5,
+      name: "g", grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5, basket_take_profit: 2,
       initial_lot: 0.01, max_positions: 10, max_exposure_lots: 0.5
     )
 

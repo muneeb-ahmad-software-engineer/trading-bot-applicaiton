@@ -5,8 +5,8 @@ require "test_helper"
 class StrategiesServiceTest < ActiveSupport::TestCase
   VALID = {
     name: "XAUUSD grid", direction: "both",
-    grid_spacing_points: 150, grid_levels: 5,
-    initial_lot: 0.01, lot_mode: "fixed",
+    grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5, basket_take_profit: 2,
+    initial_lot: 0.01,
     max_positions: 10, max_exposure_lots: 0.5
   }.freeze
 
@@ -85,8 +85,8 @@ class StrategiesServiceTest < ActiveSupport::TestCase
     metadata = @user.events.find_by(action: "strategy.started").metadata
 
     assert_equal "XAUUSD", metadata["symbol"]
-    assert_equal 5, metadata["grid_levels"]
-    assert_equal "0.05", metadata["maximum_theoretical_lots"]
+    assert_equal 5, metadata["grid_buy_orders"]
+    assert_equal "0.1", metadata["maximum_theoretical_lots"]
   end
 
   test "a failure result carries a stable code for clients to branch on" do

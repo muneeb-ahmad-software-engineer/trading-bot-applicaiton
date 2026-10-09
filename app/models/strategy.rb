@@ -45,14 +45,18 @@ class Strategy < ApplicationRecord
 
   enum :status, { draft: "draft", running: "running", stopped: "stopped" }, validate: true
   enum :direction, { both: "both", buy: "buy", sell: "sell" }, prefix: :direction, validate: true
-  enum :lot_mode, { fixed: "fixed", multiplier: "multiplier" }, prefix: :lot_mode, validate: true
 
   # What the strategy does with the market, as opposed to how it exits.
   #
   # Prefixed on purpose. `trailing?` would read as "is this strategy trailing",
-  # which is a different question with a different answer: a grid strategy can
-  # have a trailing stop too. Asking for the category has to look like asking
-  # for the category.
+  # which is a different question from "which category is this". Asking for
+  # the category has to look like asking for the category.
+  #
+  # A grid rests a ladder of stop orders: grid_buy_orders Buy Stops above the
+  # market and grid_sell_orders Sell Stops below it, one grid_spacing_points
+  # apart. Whatever fills is closed together when the combined profit reaches
+  # basket_take_profit, and the ladder is placed again grid_cycle_pause_seconds
+  # later. Every order carries initial_lot.
   #
   # A reversal strategy is always in the market on exactly one side. The
   # position's stop and a pending order for the opposite side sit at the same
@@ -67,27 +71,32 @@ class Strategy < ApplicationRecord
 
   # ------------------------------------------------------------- Grid setup
 
-  # Only a grid strategy has a grid. A trailing strategy opens a single
-  # position per direction and manages it with its stop, so requiring a spacing
-  # and a level count from it would be asking for numbers that decide nothing.
+  # Only a grid strategy has a ladder. A trailing or reversal strategy opens a
+  # single position and manages it with its stop, so requiring a spacing and
+  # order counts from it would be asking for numbers that decide nothing.
   with_options if: :category_grid? do
     validates :grid_spacing_points, numericality: { only_integer: true, greater_than: 0, less_than_or_equal_to: 100_000 }
-    validates :grid_levels, numericality: { only_integer: true, greater_than: 0, less_than_or_equal_to: 200 }
+    validates :grid_buy_orders, numericality: { only_integer: true, greater_than_or_equal_to: 0, less_than_or_equal_to: 500 }
+    validates :grid_sell_orders, numericality: { only_integer: true, greater_than_or_equal_to: 0, less_than_or_equal_to: 500 }
+    validates :grid_cycle_pause_seconds, numericality: { only_integer: true, greater_than: 0, less_than_or_equal_to: 3_600 }
+    # The basket target is the ladder's only exit. Without it every fill would
+    # stay open until something else closed it.
+    validates :basket_take_profit, presence: true
   end
 
   validates :initial_lot, numericality: { greater_than: 0, less_than_or_equal_to: 100 }
 
-  # Only meaningful in multiplier mode, and must actually scale up when present.
-  validates :lot_multiplier,
-            numericality: { greater_than_or_equal_to: 1, less_than_or_equal_to: 10 },
-            if: -> { category_grid? && lot_mode_multiplier? }
+  before_validation :drop_settings_a_grid_ignores
+
+  validate :ladder_has_at_least_one_order
+  validate :ladder_within_max_positions
 
   # --------------------------------------------------------- Trailing stop
 
   # The loss margin the user is willing to give back from the best price seen.
-  # Required for a trailing strategy, optional on a grid, where it is an extra
-  # exit layered on top of the basket targets. For a reversal strategy it is
-  # the reversal distance: how far the opposite order trails behind price.
+  # Required for a trailing strategy. For a reversal strategy it is the
+  # reversal distance: how far the opposite order trails behind price. A grid
+  # has none — its positions have one exit, the basket target.
   validates :trailing_stop_points, presence: true, unless: :category_grid?
   validates :trailing_stop_points,
             numericality: { only_integer: true, greater_than: 0, less_than_or_equal_to: 100_000 },
@@ -127,7 +136,6 @@ class Strategy < ApplicationRecord
   # it is reached and opens nothing more until the next day.
   validates :max_daily_loss, numericality: { greater_than: 0, less_than_or_equal_to: 10_000_000 }, allow_nil: true
 
-  validate :grid_levels_within_max_positions
   validate :exposure_can_accommodate_the_strategy
   validate :category_unchanged_while_running
 
@@ -140,7 +148,7 @@ class Strategy < ApplicationRecord
   def category_locked? = running?
 
   # Whether the EA will trail stops for this strategy at all. True for every
-  # trailing strategy, and for a grid that opted into the exit.
+  # trailing and reversal strategy, never for a grid.
   def trailing_enabled? = trailing_stop_points.present?
 
   # A points distance as the dollar figure the user entered it as.
@@ -200,30 +208,28 @@ class Strategy < ApplicationRecord
   # report response differs from the one it holds.
   def config_version = updated_at&.utc&.iso8601(6)
 
-  # The number of baskets this strategy can run at once. A both-directions
-  # grid can hold a buy side and a sell side simultaneously. Trailing and
-  # reversal strategies hold one position in total, whatever the direction —
-  # the EA refuses a second one.
-  def concurrent_directions = direction_both? && category_grid? ? 2 : 1
-
   # Whether the strategy's positions are opened one at a time and exited only
-  # by their stop, rather than averaged into a grid.
+  # by their stop, rather than from a ladder of resting orders.
   def single_position? = !category_grid?
+
+  # How many orders one grid cycle places in total. Nil until both counts are
+  # known, so a half-filled form is not measured against a size it does not
+  # have yet.
+  def ladder_size
+    return if grid_buy_orders.nil? || grid_sell_orders.nil?
+
+    grid_buy_orders + grid_sell_orders
+  end
 
   # The largest total volume this configuration could ever open, used to warn a
   # user before their exposure ceiling silently truncates the strategy.
   def maximum_theoretical_lots
-    # A trailing strategy holds one position at a time, and re-enters only
-    # once the previous one has closed. Its ceiling is the entry size itself.
-    return (initial_lot.to_d * concurrent_directions).round(2) if single_position?
+    # A trailing or reversal strategy holds one position at a time, and
+    # re-enters only once the previous one has closed. Its ceiling is the entry
+    # size itself. A grid's is every ladder order filled at once.
+    return initial_lot.to_d.round(2) if single_position?
 
-    if lot_mode_multiplier? && lot_multiplier.to_d > 1
-      # Geometric series: a(rⁿ − 1) / (r − 1)
-      r = lot_multiplier.to_d
-      (initial_lot.to_d * ((r**grid_levels) - 1) / (r - 1)).round(2)
-    else
-      (initial_lot.to_d * grid_levels).round(2)
-    end
+    (initial_lot.to_d * ladder_size.to_i).round(2)
   end
 
   class NotVerified < StandardError; end
@@ -289,19 +295,42 @@ class Strategy < ApplicationRecord
     end
   end
 
-  def grid_levels_within_max_positions
+  # A grid position has one exit, the basket target, and the ladder's two
+  # counts decide its sides. Trailing settings or a one-way direction left over
+  # from another category would describe behaviour the EA does not perform for
+  # a grid. They are cleared rather than refused: the form hides these fields
+  # for a grid, and an error on a field nobody can see is a dead end.
+  def drop_settings_a_grid_ignores
     return unless category_grid?
-    return if grid_levels.blank? || max_positions.blank?
-    return if grid_levels <= max_positions
 
-    errors.add(:grid_levels,
-      "cannot exceed maximum positions (#{max_positions}) — the grid would be cut short before its last level")
+    self.direction = "both"
+    self.trailing_stop_points = nil
+    self.trailing_activation_points = nil
+    self.trailing_step_points = nil
+    self.entry_distance_points = nil
+  end
+
+  def ladder_has_at_least_one_order
+    return unless category_grid?
+    return if ladder_size.nil? || ladder_size >= 1
+
+    errors.add(:grid_buy_orders, "and Sell Stop orders cannot both be zero — the ladder would place nothing")
+  end
+
+  def ladder_within_max_positions
+    return unless category_grid?
+    return if ladder_size.nil? || max_positions.blank?
+    return if ladder_size <= max_positions
+
+    errors.add(:grid_buy_orders,
+      "plus Sell Stop orders (#{ladder_size}) cannot exceed maximum positions (#{max_positions}) — " \
+      "the ladder would be cut short. Raise Maximum positions to at least #{ladder_size}, " \
+      "or place fewer orders")
   end
 
   def exposure_can_accommodate_the_strategy
     return if initial_lot.blank? || max_exposure_lots.blank?
-    return if category_grid? && grid_levels.blank?
-    return if category_grid? && lot_mode_multiplier? && lot_multiplier.blank?
+    return if category_grid? && ladder_size.nil?
     return if maximum_theoretical_lots <= max_exposure_lots.to_d
 
     errors.add(:max_exposure_lots, exposure_shortfall_message)
@@ -312,16 +341,16 @@ class Strategy < ApplicationRecord
       "is below what this strategy can open (#{readable_maximum_lots} lots). " \
       "Raise the ceiling or lower the entry lot size."
     else
-      "is below what this grid can open (#{readable_maximum_lots} lots). " \
-      "Raise the ceiling, reduce levels, or lower the initial lot size."
+      "is below what this grid can open (#{readable_maximum_lots} lots: #{ladder_size.to_i} orders " \
+      "of #{ActiveSupport::NumberHelper.number_to_rounded(initial_lot, precision: 2)} lots). " \
+      "#{maximum_theoretical_lots > DISPLAY_LOT_CEILING ? "Raise it" : "Raise it to at least #{readable_maximum_lots}"}, " \
+      "place fewer ladder orders, or lower the lot size."
     end
   end
 
-  # A compounding grid grows geometrically, so a careless multiplier produces a
-  # figure with dozens of digits. Printing that verbatim gives the user a wall
-  # of numerals where they needed a readable quantity, and the message is
-  # already telling them the answer is "far more than your ceiling". Past the
-  # point where the exact total stops meaning anything, say that instead.
+  # Past the point where the exact total stops meaning anything, say "more
+  # than" instead of printing a wall of numerals: the message is already telling
+  # the user the answer is "far more than your ceiling".
   def readable_maximum_lots
     total = maximum_theoretical_lots
 

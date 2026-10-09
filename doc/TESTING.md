@@ -45,6 +45,10 @@ copy it now.
 
 ### 5. Run the simulator
 
+The default scenario pretends to be a grid EA mid-cycle: a few rungs filled,
+the rest of a 5 + 5 ladder resting, and an `execution` block the Robot state
+card renders (state `ARMED`, cycle, counts, basket P/L).
+
 ```bash
 bin/simulate_terminal --token ggk_your_token --strategy 1
 ```
@@ -261,10 +265,26 @@ Only after stage 2 has been stable.
 
 Set `InpAllowTrading = true` and reattach the EA.
 
-Watch closely for the first basket:
+Watch closely for the first basket.
 
-* Does level 1 open at the size you configured?
-* Do further levels open at the spacing you set, and no closer?
+For a **grid** (a ladder of stop orders, `mt5/README.md` → *How the grid
+works*), on a **hedging** demo account:
+
+* Does a ladder of `buy + sell` pending orders appear, one gap apart, the
+  nearest at least the broker's stop level from the market?
+* Do only the rungs price actually reaches fill, the rest staying pending?
+* Does the Robot state card show `ARMED`, the cycle number, filled/resting
+  counts, and a basket P/L equal to the terminal's combined floating P/L?
+* When the basket P/L reaches the take profit: do all positions close, do all
+  orders cancel, does the log show the counts, and does `COOLDOWN` count down?
+* After the pause, does a new ladder appear at the new price with the cycle
+  number up by one?
+* Restart the terminal mid-cycle: are the tickets the same afterwards, with
+  no new orders placed?
+
+For a **trailing** or **reversal** strategy:
+
+* Does the position open at the size you configured?
 * Does the position count stop at `max_positions`?
 * Does total volume stop at `max_exposure_lots`?
 * Does the basket close at your take profit or stop loss?
@@ -275,8 +295,9 @@ will not save you — which is exactly why stage 3 belongs on a demo account and
 why you should verify each limit yourself.
 
 Press **Stop strategy** in the web interface and confirm the EA stops opening
-new levels. Stopping does **not** close open positions; that is deliberate and
-stated in the interface.
+new positions. For a grid the resting ladder is withdrawn, since every rung is
+a future entry. Stopping does **not** close open positions; that is deliberate
+and stated in the interface — a grid's open basket still closes at its target.
 
 ---
 

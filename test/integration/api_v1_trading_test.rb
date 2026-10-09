@@ -8,8 +8,8 @@ require "test_helper"
 class ApiV1TradingTest < ActionDispatch::IntegrationTest
   VALID_STRATEGY = {
     name: "XAUUSD grid", direction: "both",
-    grid_spacing_points: 150, grid_levels: 5,
-    initial_lot: 0.01, lot_mode: "fixed",
+    grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5, basket_take_profit: 2,
+    initial_lot: 0.01,
     max_positions: 10, max_exposure_lots: 0.5
   }.freeze
 
@@ -115,6 +115,19 @@ class ApiV1TradingTest < ActionDispatch::IntegrationTest
     report(orders: [])
 
     assert_equal "cancelled", order.reload.status
+  end
+
+  test "an order that stops being reported because it filled is marked filled" do
+    report
+    order = @strategy.orders.sole
+
+    # MT5 keeps the ticket: the stop order's number becomes the position's.
+    report(orders: [], positions: [ { ticket: "2001", direction: "buy", grid_level: 2, volume: "0.01",
+                                      open_price: "2295.20", current_price: "2296.00", profit: "0.80",
+                                      swap: "0", commission: "0", opened_at: Time.current.iso8601 } ])
+
+    assert_equal "filled", order.reload.status
+    assert_equal 1, @strategy.positions.where(ticket: "2001").count
   end
 
   test "omitting positions entirely leaves them untouched" do

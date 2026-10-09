@@ -4,12 +4,6 @@
 <%= render layout: "shared/app_shell",
            locals: { title: "Dashboard", subtitle: "Your account overview." } do %>
 
-  <%#
-    Subscribes to this account's dashboard stream. Turbo signs the stream name,
-    so one account cannot subscribe to another's, and ApplicationCable::Connection
-    rejects a visitor with no session.
-  %>
-  <%= turbo_stream_from current_user, :dashboard %>
-
+  <%# The account's stream is subscribed by the sidebar, on every page. %>
   <%= render "dashboard/live", user: current_user %>
 <% end %>

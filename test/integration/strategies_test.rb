@@ -5,8 +5,8 @@ class StrategiesTest < ActionDispatch::IntegrationTest
 
   VALID = {
     name: "XAUUSD grid", direction: "both",
-    grid_spacing_points: 150, grid_levels: 5,
-    initial_lot: 0.01, lot_mode: "fixed",
+    grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5, basket_take_profit: 2,
+    initial_lot: 0.01,
     max_positions: 10, max_exposure_lots: 0.5
   }.freeze
 
@@ -32,7 +32,7 @@ class StrategiesTest < ActionDispatch::IntegrationTest
 
   test "an invalid configuration is rejected with errors shown" do
     assert_no_difference "Strategy.count" do
-      post strategies_path, params: { strategy: VALID.merge(grid_levels: 50, max_positions: 5) }
+      post strategies_path, params: { strategy: VALID.merge(grid_buy_orders: 50, max_positions: 5) }
     end
 
     assert_response :unprocessable_entity
@@ -82,9 +82,9 @@ class StrategiesTest < ActionDispatch::IntegrationTest
     get edit_strategy_path(strategy)
     assert_response :success
 
-    patch strategy_path(strategy), params: { strategy: { grid_levels: 8, max_exposure_lots: 1.0 } }
+    patch strategy_path(strategy), params: { strategy: { grid_buy_orders: 4, max_exposure_lots: 1.0 } }
     assert_redirected_to strategy
-    assert_equal 8, strategy.reload.grid_levels
+    assert_equal 4, strategy.reload.grid_buy_orders
     assert_predicate strategy, :running?
 
     patch strategy_path(strategy), params: { strategy: { category: "trailing" } }
@@ -101,9 +101,9 @@ class StrategiesTest < ActionDispatch::IntegrationTest
     strategy.start!
     strategy.stop!
 
-    patch strategy_path(strategy), params: { strategy: VALID.merge(grid_levels: 8, max_exposure_lots: 1.0) }
+    patch strategy_path(strategy), params: { strategy: VALID.merge(grid_buy_orders: 4, max_exposure_lots: 1.0) }
 
-    assert_equal 8, strategy.reload.grid_levels
+    assert_equal 4, strategy.reload.grid_buy_orders
   end
 
   test "starting a second strategy for the same symbol is refused" do
@@ -172,7 +172,7 @@ class StrategiesTest < ActionDispatch::IntegrationTest
 
     strategy = Strategy.last
     assert_predicate strategy, :category_trailing?
-    assert_nil strategy.grid_levels
+    assert_nil strategy.grid_buy_orders
     assert_nil strategy.grid_spacing_points
     assert_equal 200, strategy.trailing_stop_points
   end
@@ -208,12 +208,12 @@ class StrategiesTest < ActionDispatch::IntegrationTest
 
     patch strategy_path(strategy), params: {
       strategy: { category: "trailing", trailing_stop_points: 200,
-                  grid_spacing_points: "", grid_levels: "" }
+                  grid_spacing_points: "", grid_buy_orders: "", grid_sell_orders: "" }
     }
 
     strategy.reload
     assert_predicate strategy, :category_trailing?
-    assert_nil strategy.grid_levels
+    assert_nil strategy.grid_buy_orders
   end
   # ------------------------------------------------ Setting explanations
 

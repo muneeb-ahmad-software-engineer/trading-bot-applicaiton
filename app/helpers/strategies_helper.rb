@@ -1,6 +1,9 @@
 module StrategiesHelper
-  # What the EA's execution state (mt5/Include/GoldGrid/State.mqh) means, as
-  # [status-indicator state, plain-words label].
+  # What the EA's execution state means, as [status-indicator state,
+  # plain-words label]. Trailing and reversal report the single-position
+  # machine (mt5/Include/GoldGrid/State.mqh); the grid reports its cycle
+  # (mt5/Include/GoldGrid/Cycle.mqh). INITIALIZING, CLOSING and RECOVERY are
+  # shared names with the same meaning in both.
   EXECUTION_STATES = {
     "INITIALIZING"     => [ :warning, "Starting up — checking the broker" ],
     "WAITING"          => [ :running, "Flat — waiting for an entry" ],
@@ -9,7 +12,9 @@ module StrategiesHelper
     "REVERSING"        => [ :warning, "Reversing — closing the old side" ],
     "CLOSING"          => [ :warning, "Closing — waiting for the broker" ],
     "RECOVERY"         => [ :error,   "Recovery — nothing new is opened" ],
-    "GRID"             => [ :running, "Grid — managing baskets" ]
+    "PLACING"          => [ :running, "Placing the ladder" ],
+    "ARMED"            => [ :live,    "Ladder in place — watching the basket" ],
+    "COOLDOWN"         => [ :running, "Flat — pausing before the next cycle" ]
   }.freeze
 
   def execution_state_indicator(state)

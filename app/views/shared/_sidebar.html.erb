@@ -5,7 +5,6 @@
   page. On a trading platform "is my terminal reporting?" is not something to
   go looking for — it is the first thing you check, every time.
 %>
-<% snapshot = DashboardSnapshot.new(current_user) %>
 
 <aside class="sidebar hidden lg:flex" aria-label="Main">
   <div class="sidebar-brand">
@@ -37,17 +36,14 @@
     <% end %>
   </nav>
 
-  <div class="sidebar-status mb-3"
-       data-controller="connection-freshness"
-       data-connection-freshness-last-report-value="<%= snapshot.last_report_iso %>"
-       data-connection-freshness-stale-after-value="<%= DashboardSnapshot::STALE_AFTER.to_i %>">
-    <span data-connection-freshness-target="status">
-      <%= render "dashboard/connection_status", connection: snapshot.connection %>
-    </span>
-    <span class="caption sidebar-status-detail" data-connection-freshness-target="age">
-      <%= snapshot.connection&.last_report_at ? "#{time_ago_in_words(snapshot.connection.last_report_at)} ago" : "No terminal yet" %>
-    </span>
-  </div>
+  <%#
+    The account's live stream, subscribed on every signed-in page: each
+    terminal report replaces the badge below (and, on the dashboard, its live
+    region). Turbo signs the stream name, so one account cannot subscribe to
+    another's.
+  %>
+  <%= turbo_stream_from current_user, :dashboard %>
+  <%= render "shared/connection_badge", user: current_user %>
 
   <div class="sidebar-footer">
     <span class="flex size-8 shrink-0 items-center justify-center rounded-full bg-surface-elevated text-xs font-semibold text-text-primary"

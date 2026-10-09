@@ -16,7 +16,7 @@ class AccountDeletionTest < ActiveSupport::TestCase
     @user.verify!
 
     @strategy = @user.strategies.create!(
-      name: "XAUUSD grid", grid_spacing_points: 150, grid_levels: 5,
+      name: "XAUUSD grid", grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5, basket_take_profit: 2,
       initial_lot: 0.01, max_positions: 10, max_exposure_lots: 0.5
     )
     @strategy.start!

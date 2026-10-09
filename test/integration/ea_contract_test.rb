@@ -13,8 +13,8 @@ require "test_helper"
 class EaContractTest < ActionDispatch::IntegrationTest
   VALID_STRATEGY = {
     name: "XAUUSD grid", direction: "both",
-    grid_spacing_points: 150, grid_levels: 5,
-    initial_lot: 0.01, lot_mode: "fixed",
+    grid_spacing_points: 150, grid_buy_orders: 5, grid_sell_orders: 5, basket_take_profit: 2,
+    initial_lot: 0.01,
     max_positions: 10, max_exposure_lots: 0.5
   }.freeze
 
@@ -43,7 +43,8 @@ class EaContractTest < ActionDispatch::IntegrationTest
        "terminal":{"ea_version":"1.00","broker":"Demo Broker Ltd","account_login":"12345678","symbol":"XAUUSD"},
        "tick":{"bid":"2318.40","ask":"2318.45","spread_points":5},
        "execution":{"state":"BUY_ACTIVE","reason":"entry filled","reversal_level":"2316.40",
-                    "daily_profit":"-12.50","risk_halt":""},
+                    "daily_profit":"-12.50","risk_halt":"",
+                    "cycle":null,"resting_orders":null,"filled_orders":null,"basket_profit":null,"pause_seconds_left":null},
        "account":{"currency":"USD","balance":"10000.00","equity":"10182.50","margin":"120.00",
                   "free_margin":"10062.50","margin_level_percent":"8485.42"},
        "positions":[#{positions == :one ? position : ''}],
@@ -130,6 +131,46 @@ class EaContractTest < ActionDispatch::IntegrationTest
     end
   end
 
+  # A grid EA's execution block (mt5/Include/GoldGrid/Cycle.mqh): the cycle it
+  # is on, how many ladder rungs rest and have filled, the basket's floating
+  # P/L, and the pause left between cycles — null for the other categories.
+  test "a grid EA's cycle is stored beside its execution state" do
+    grid_execution = '"execution":{"state":"ARMED","reason":"ladder complete — 58 resting, 2 filled, 0 skipped, capacity 60",' \
+                     '"reversal_level":"0.00000","daily_profit":"1.10","risk_halt":"",' \
+                     '"cycle":3,"resting_orders":58,"filled_orders":2,"basket_profit":"-0.84","pause_seconds_left":0},'
+    payload = ea_payload.sub(/"execution":\{[^}]*\},/, grid_execution)
+
+    post "/api/v1/trading/report", params: payload, headers: headers
+
+    assert_response :accepted
+    connection = @user.terminal_connections.sole
+    assert_equal "ARMED", connection.execution_state
+    assert_equal 3, connection.cycle_number
+    assert_equal 58, connection.resting_orders
+    assert_equal 2, connection.filled_orders
+    assert_equal BigDecimal("-0.84"), connection.basket_profit
+    assert_equal 0, connection.pause_seconds_left
+    assert_nil connection.reversal_level, "a zero reversal level means none"
+  end
+
+  test "a report without the grid figures clears them" do
+    post "/api/v1/trading/report", params: ea_payload, headers: headers
+
+    connection = @user.terminal_connections.sole
+    assert_nil connection.cycle_number
+    assert_nil connection.resting_orders
+    assert_nil connection.basket_profit
+  end
+
+  test "a ladder order's rung is stored as its grid level" do
+    order = '{"ticket":"5001","order_type":"buy_stop","grid_level":4,"volume":"0.01","price":"2326.45",' \
+            '"placed_at":"2026-09-06T06:00:00Z"}'
+    post "/api/v1/trading/report", params: ea_payload.sub('"orders":[]', "\"orders\":[#{order}]"), headers: headers
+
+    assert_response :accepted
+    assert_equal 4, @strategy.orders.find_by(ticket: "5001").grid_level
+  end
+
   test "an EA older than the state machine still reports, with no state stored" do
     post "/api/v1/trading/report", params: ea_payload.sub(/"execution":\{[^}]*\},/, ""), headers: headers
 
@@ -158,7 +199,7 @@ class EaContractTest < ActionDispatch::IntegrationTest
     %w[stop_points activation_points step_points].each do |key|
       assert strategy.fetch("trailing").key?(key), "trailing.#{key} missing — the EA reads it"
     end
-    %w[spacing_points levels initial_lot lot_mode lot_multiplier].each do |key|
+    %w[spacing_points buy_stop_orders sell_stop_orders cycle_pause_seconds initial_lot].each do |key|
       assert strategy.fetch("grid").key?(key), "grid.#{key} missing — the EA reads it"
     end
     %w[take_profit stop_loss].each do |key|
@@ -184,8 +225,8 @@ class EaContractTest < ActionDispatch::IntegrationTest
     assert_nil @strategy.positions.sole.stop_loss
   end
 
-  # A trailing strategy sends null spacing and levels. ParseStrategy() accepts
-  # that for this category, so the platform has to be able to emit it.
+  # A trailing strategy sends a null ladder. ParseStrategy() accepts that for
+  # this category, so the platform has to be able to emit it.
   test "a trailing strategy serialises with no grid and a distance the EA can read" do
     @strategy.stop!
     trailing = @user.strategies.create!(
@@ -199,7 +240,9 @@ class EaContractTest < ActionDispatch::IntegrationTest
     strategy = JSON.parse(response.body).fetch("strategy")
     assert_equal "trailing", strategy.fetch("category")
     assert_nil strategy.dig("grid", "spacing_points")
-    assert_nil strategy.dig("grid", "levels")
+    assert_nil strategy.dig("grid", "buy_stop_orders")
+    assert_nil strategy.dig("grid", "sell_stop_orders")
+    assert_nil strategy.dig("grid", "cycle_pause_seconds")
     assert_equal 200, strategy.dig("trailing", "stop_points")
     assert_nil strategy.dig("trailing", "activation_points")
     # Never null: the EA would otherwise modify the position on every tick.

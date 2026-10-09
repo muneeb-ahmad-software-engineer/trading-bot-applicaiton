@@ -17,9 +17,15 @@
 //| ---------------------------------------------------------------- |
 //|                                                                   |
 //| Three strategy categories are supported:                          |
-//|   * grid     — adds levels as price moves against the basket.     |
-//|                With direction "both" the buy and sell baskets run |
-//|                independently (hedging account required).          |
+//|   * grid     — BEING REBUILT (grid-strategy-plan.md): a ladder of |
+//|                resting Buy Stop orders above the market and Sell  |
+//|                Stop orders below it, one gap apart, closed as ONE |
+//|                basket at a combined profit target, then placed    |
+//|                again after a pause. The cycle is persisted and    |
+//|                reconciled with the broker on every start. Risk    |
+//|                gates (Phase 6) and reporting (Phase 7) are still  |
+//|                being wired in. Do not deploy it to a trading      |
+//|                account yet.                                       |
 //|   * trailing — ONE position in total, managed by a stop that      |
 //|                follows price in the favourable direction only.    |
 //|   * reversal — ONE position in total, with NO stop loss. Flat, it |
@@ -35,12 +41,17 @@
 //| side; anything else is closed as a breach (StepState / Recover).  |
 //|                                                                   |
 //| Behaviour when the strategy is stopped:                           |
-//|   * No new positions or baskets are opened.                       |
+//|   * No new positions or baskets are opened. A grid's resting      |
+//|     ladder orders are withdrawn — each one is a future entry.     |
 //|   * Existing baskets CONTINUE to be managed — basket take profit, |
 //|     stop loss and trailing stops still apply. Abandoning an open  |
 //|     basket with no exit would be more dangerous than continuing   |
 //|     to manage it.                                                 |
 //|   * Nothing is force-closed. Stopping is not "close everything".  |
+//|   * The grid holds through the market's daily break and the       |
+//|     weekend: resting orders and positions are held by the broker  |
+//|     and the basket exit resumes at the open. (Only the reversal   |
+//|     goes flat before the break — InpFlatBeforeBreakMinutes.)      |
 //|                                                                   |
 //| Behaviour when the platform is unreachable:                       |
 //|   * Fails closed. No new positions are opened once the cached     |
@@ -56,6 +67,7 @@
 #include "Include/GoldGrid/Strategy.mqh"
 #include "Include/GoldGrid/Grid.mqh"
 #include "Include/GoldGrid/State.mqh"
+#include "Include/GoldGrid/Cycle.mqh"
 #include "Include/GoldGrid/Tester.mqh"
 
 //--- Inputs -------------------------------------------------------------
@@ -87,10 +99,15 @@ input int    InpTestStepPoints                = 20;            // Trailing step 
 input int    InpTestEntryPoints               = 0;             // Entry distance, reversal (0 = trailing distance)
 input int    InpTestMaxSpreadPoints           = 0;             // Maximum spread (0 = none)
 input double InpTestMaxDailyLoss              = 0.0;           // Maximum daily loss (0 = none)
-input int    InpTestGridSpacingPoints         = 150;           // Grid spacing (grid only)
-input int    InpTestGridLevels                = 5;             // Grid levels (grid only)
+input int    InpTestGridSpacingPoints         = 200;           // Grid: gap between ladder orders (points)
+input int    InpTestGridBuyOrders             = 30;            // Grid: Buy Stop orders per cycle
+input int    InpTestGridSellOrders            = 30;            // Grid: Sell Stop orders per cycle
+input double InpTestGridTargetMoney           = 2.0;           // Grid: combined basket profit target (account currency)
+input int    InpTestGridPauseSeconds          = 10;            // Grid: pause between cycles (seconds)
+input int    InpTestOrderLimit                = 0;             // Grid: pretend the broker allows this many orders (0 = real)
 input int    InpChaosEveryMinutes             = 0;             // Chaos: inject a failure every N minutes (0 = off)
 input int    InpChaosSeed                     = 1;             // Chaos: random seed
+input bool   InpChaosRestartOnly              = false;         // Chaos: inject EA restarts only
 
 //--- How far back each report looks for closed positions to include. Six
 //--- hours, so that a platform that recorded a close from stale data — or
@@ -204,6 +221,20 @@ bool EnforceRiskHalts()
    if(!InpAllowTrading)
       return true;
 
+   //--- The grid closes through its own CLOSING state, so the close is
+   //--- confirmed with the broker, the cycle is retired, and the next one
+   //--- waits in COOLDOWN until the halt clears (CooldownCycle).
+   if(g_strategy.category == CATEGORY_GRID)
+     {
+      if(g_cycle.Is(CYCLE_INITIALIZING))
+         ReconcileCycle();
+      else if(!g_cycle.Is(CYCLE_CLOSING) && (g_grid.TotalPositions() > 0 || g_grid.OurOrders() > 0))
+         BeginCycleClose("risk halt — " + halt, g_grid.CombinedBasket());
+      if(g_cycle.Is(CYCLE_CLOSING))
+         CloseCycle();
+      return true;
+     }
+
    int cancelled = g_grid.DeleteAllPendingStops() + g_grid.DeleteStrayOrders();
    if(cancelled > 0)
       PrintFormat("GoldGrid: risk halt cancelled %d pending order(s)", cancelled);
@@ -257,26 +288,36 @@ int      RECOVERY_SETTLE_SECONDS       = 10;
 
 //--- THE REVERSAL (reversal category).
 //---
-//--- The open position carries no stop loss. Its exit is a real stop order for
-//--- the opposite side, held by the broker and trailed behind price by
-//--- TrailOppositeStop (Include/GoldGrid/Grid.mqh). When price turns by the
-//--- trailing distance that order fills, and for a moment both sides are open:
+//--- The open position's exit is one price trailed behind the market by
+//--- TrailReversalExit (Include/GoldGrid/Grid.mqh), held by the broker twice:
+//--- as the position's own stop loss, and as a stop order for the opposite
+//--- side at the same price. When price turns by the trailing distance the
+//--- broker closes the old position and opens the new one on the same tick —
+//--- whether or not this EA is running, busy or waiting on the platform:
 //---
-//---   *_ACTIVE --opposite stop fills--> REVERSING
+//---   BUY_ACTIVE --stop loss + sell stop at the exit--> SELL_ACTIVE
+//---
+//--- The new position is opened with its first stop loss already attached,
+//--- and gets its own trailing exit on the next pass.
+//---
+//--- If both sides are ever open together (a stop loss that could not be set
+//--- in time), the old way still applies: REVERSING, and the EA closes the
+//--- old one.
+//---
+//---   *_ACTIVE --opposite stop fills, old still open--> REVERSING
 //---   REVERSING --old position closed by the EA--> the opposite *_ACTIVE
 //---
-//--- The EA closes the old position the moment it sees the fill, and the new
-//--- one gets its own trailing opposite stop. With the terminal offline the
-//--- two stay open together — hedged, so the loss stops growing — until the
-//--- EA is back and closes the old one.
-//---
-//--- When reversing is not allowed at that moment (strategy stopped, risk
-//--- halt, platform unreachable) both are closed instead, which leaves the
-//--- account flat at the trailing level: the order still did its job as the
-//--- position's exit.
+//--- While reversing is not allowed (strategy stopped, risk halt, platform
+//--- unreachable) the stop order is withdrawn and the stop loss alone stays:
+//--- the position still exits at the trailing level, flat.
 ulong    reversing_close_at    = 0;     // last close request sent while REVERSING
 bool     reversing_flat        = false; // close both sides instead of keeping the new one
 int      REVERSE_RETRY_SECONDS = 2;
+//--- Set when a reversal position closes: the opposite stop order that
+//--- triggered with its stop loss is left alone this long while its fill
+//--- reaches the terminal.
+ulong    exit_settling_since   = 0;
+const ulong EXIT_SETTLE_MS     = 3000;
 
 bool SinglePositionMode()
   {
@@ -442,19 +483,21 @@ void Recover(const int held, const ulong ticket, const ENUM_EXEC_STATE active)
   }
 
 //+------------------------------------------------------------------+
-//| The opposite stop of the one open position: trailed behind price, |
-//| alone (nothing rests on the side already held), and — once it is  |
-//| in place — the position's leftover stop loss from an earlier      |
-//| build removed.                                                    |
+//| The exit of the one open position — its stop loss and the         |
+//| opposite stop order at the same price — trailed behind price, and |
+//| nothing resting on the side already held.                         |
 //+------------------------------------------------------------------+
 void KeepOppositeStop(const ENUM_POSITION_TYPE held_side, const ulong ticket)
   {
    g_grid.DeletePendingStops(held_side);
    g_grid.DeleteStrayOrders();
 
-   double lot = GridLotForLevel(g_strategy, 1, _Symbol);
-   if(g_grid.TrailOppositeStop(g_strategy, held_side, lot, StringFormat("GG:%I64d:REV", g_strategy.id)))
-      g_grid.RemoveStopLoss(ticket);
+   //--- A spread spike does not withdraw the order: the spread flickers, and
+   //--- an order that comes and goes is not there when it is needed. A fill
+   //--- during a spike is closed when it is seen (StepState).
+   double lot = EntryLot(g_strategy, _Symbol);
+   g_grid.TrailReversalExit(g_strategy, held_side, ticket, lot, StringFormat("GG:%I64d:REV", g_strategy.id),
+                            ReversalBlockedReason(false) == "");
   }
 
 //--- THE MARKET GUARD (reversal category).
@@ -548,8 +591,9 @@ string MarketGuardReason(bool &closing)
   }
 
 //--- "" when a filled opposite stop may become the new position, otherwise why
-//--- not — in which case both sides are closed.
-string ReversalBlockedReason()
+//--- not — in which case it is closed. `spread` false leaves out the spread,
+//--- which decides what to do with a fill, not whether the order rests.
+string ReversalBlockedReason(const bool spread_counts = true)
   {
    if(halted)
       return halt_reason;
@@ -559,7 +603,7 @@ string ReversalBlockedReason()
       return "the strategy is stopped";
    if(!ConfigurationIsFresh())
       return "the platform has not answered recently";
-   string spread = SpreadTooWideReason(true);
+   string spread = spread_counts ? SpreadTooWideReason(true) : "";
    if(spread != "")
       return spread;
    return RiskHaltReason();
@@ -678,7 +722,15 @@ void StepState()
 
       case STATE_WAITING:
          if(held == 1)
-            g_state.Set(active, "entry filled", ticket);
+           {
+            //--- Right after an exit, a new position is the reversal whose
+            //--- fill arrived after the close.
+            bool reversed = g_strategy.category == CATEGORY_REVERSAL && exit_settling_since > 0;
+            g_state.Set(active, reversed ? "reversal — the opposite stop filled at the exit" : "entry filled", ticket);
+            string blocked = reversed ? ReversalBlockedReason() : "";
+            if(blocked != "" && InpAllowTrading && g_grid.TradingAllowed())
+               BeginClose(ticket, StringFormat("the reversal filled, but %s", blocked));
+           }
          break;
 
       case STATE_BUY_ACTIVE:
@@ -689,14 +741,29 @@ void StepState()
             //--- manual close, a stop-out. That is not a signal to enter again
             //--- — the cooldown starts here — and the position's opposite stop
             //--- goes with it.
+            //---
+            //--- A reversal's stop loss and its opposite stop trigger on the
+            //--- same quote, and the fill of the order can reach the terminal
+            //--- a moment after the close. The order is left alone for
+            //--- EXIT_SETTLE_MS so it is not cancelled while it fills;
+            //--- ManageReversal withdraws it after that if it is still there.
             g_state.RecordClosedSide(g_state.Is(STATE_BUY_ACTIVE) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL);
             g_state.RecordClose();
-            if(g_strategy.category == CATEGORY_REVERSAL && InpAllowTrading)
-               g_grid.DeleteAllPendingStops();
+            if(g_strategy.category == CATEGORY_REVERSAL)
+               exit_settling_since = NowMs();
             g_state.Set(STATE_WAITING, StringFormat("#%I64u closed", g_state.Ticket()));
            }
          else if(ticket != g_state.Ticket() || !g_state.Is(active))
-            g_state.Set(active, "the open position changed", ticket);
+           {
+            //--- The usual way a reversal completes now: the broker closed
+            //--- the old position at its stop loss and opened this one.
+            bool reversed = g_strategy.category == CATEGORY_REVERSAL && g_state.IsActive() && !g_state.Is(active);
+            g_state.Set(active, reversed ? StringFormat("reversal — the broker closed #%I64u at its stop loss", g_state.Ticket())
+                                         : "the open position changed", ticket);
+            string blocked = reversed ? ReversalBlockedReason() : "";
+            if(blocked != "" && InpAllowTrading && g_grid.TradingAllowed())
+               BeginClose(ticket, StringFormat("the reversal filled, but %s", blocked));
+           }
          break;
 
       case STATE_REVERSING:
@@ -757,6 +824,12 @@ int OnInit()
 
    g_state.Configure(InpMagicNumber, _Symbol);
    ENUM_EXEC_STATE previous = g_state.Load();
+   g_started_ms = NowMs();
+   g_cycle.Configure(InpMagicNumber, _Symbol);
+   ENUM_CYCLE_STATE previous_cycle = g_cycle.Load();
+   if(g_cycle.Number() > 0)
+      PrintFormat("GoldGrid: grid cycle record — cycle %d, was %s%s", g_cycle.Number(), CycleStateName(previous_cycle),
+                  g_cycle.Anchored() ? "" : ", not anchored");
    last_quote_at = (datetime)SymbolInfoInteger(_Symbol, SYMBOL_TIME);
    long since_close = g_state.SecondsSinceClose();
    PrintFormat("GoldGrid: previous session ended in state %s%s. Reconciling with the broker before "
@@ -807,6 +880,11 @@ void OnDeinit(const int reason)
 void OnTimer()
   {
    g_grid.TrackEquity();
+   //--- Keeps the grid's cycle record from expiring (the terminal deletes a
+   //--- global variable untouched for four weeks). Nothing to do for the
+   //--- other categories, whose record is written on every transition.
+   if(g_strategy.category == CATEGORY_GRID)
+      g_cycle.Touch();
 
    //--- The tester has no platform to refresh from or report to.
    if(IsTester())
@@ -934,9 +1012,16 @@ void ManageBaskets()
    static bool closed_noted = false;
    if(g_grid.TradingGate() == GATE_MARKET_CLOSED)
      {
+      //--- Close-only (the broker forbids new entries, not closes): a grid
+      //--- basket at its target, or under a risk halt, is still closed.
+      bool close_only = g_strategy.category == CATEGORY_GRID && g_grid.OnlyClosesAllowed();
       if(!closed_noted)
-         Print("GoldGrid: market closed for this symbol — sending nothing until it opens");
+         Print(close_only ? "GoldGrid: the symbol is close-only — the basket is still closed at its target or on a "
+                            "risk halt; nothing new is placed"
+                          : "GoldGrid: market closed for this symbol — sending nothing until it opens");
       closed_noted = true;
+      if(close_only)
+         ManageGridCloseOnly();
       return;
      }
    if(closed_noted)
@@ -970,6 +1055,12 @@ void ManageBaskets()
       return;
      }
 
+   if(g_strategy.category == CATEGORY_GRID)
+     {
+      ManageGridCycle();
+      return;
+     }
+
    ManageDirection(POSITION_TYPE_BUY);
    ManageDirection(POSITION_TYPE_SELL);
   }
@@ -991,18 +1082,14 @@ bool ExitBasketIfDue(const ENUM_POSITION_TYPE type, const SBasket &basket)
       return false;
      }
 
-   //--- A single-position strategy's close is tracked through CLOSING until
-   //--- the broker confirms it, so nothing can open in the meantime.
+   //--- The close is tracked through CLOSING until the broker confirms it, so
+   //--- nothing can open in the meantime. (Only trailing and reversal reach
+   //--- this: the grid has its own combined-basket exit.)
    int closed = 0;
-   if(SinglePositionMode())
-     {
-      ENUM_POSITION_TYPE held_type;
-      ulong ticket = g_grid.OurPosition(held_type);
-      if(ticket != 0 && held_type == type && BeginClose(ticket, "basket exit"))
-         closed = 1;
-     }
-   else
-      closed = g_grid.CloseBasket(type);
+   ENUM_POSITION_TYPE held_type;
+   ulong ticket = g_grid.OurPosition(held_type);
+   if(ticket != 0 && held_type == type && BeginClose(ticket, "basket exit"))
+      closed = 1;
 
    //--- Record *why*, and the spread at the moment of the decision.
    //---
@@ -1062,13 +1149,12 @@ void ManageDirection(const ENUM_POSITION_TYPE type)
         }
      }
 
-   //--- A trailing strategy holds one position; a grid holds as many per
-   //--- direction as it has levels.
-   int next_level = basket.count + 1;
-   if(next_level > g_strategy.LevelsPerDirection())
+   //--- A trailing strategy holds one position per direction at most, and
+   //--- SinglePositionMode() above reduces that to one in total.
+   if(basket.count > 0)
       return;
 
-   double next_lot = GridLotForLevel(g_strategy, next_level, _Symbol);
+   double next_lot = EntryLot(g_strategy, _Symbol);
 
    string reason;
    if(!g_grid.MayOpen(g_strategy, ConfigurationIsFresh(), next_lot, type, reason))
@@ -1097,47 +1183,750 @@ void ManageDirection(const ENUM_POSITION_TYPE type)
    if(NowMs() - last_open_at[DirectionSlot(type)] < (ulong)OPEN_COOLDOWN_SECONDS * 1000)
       return;
 
-   //--- The first position of a direction opens at market. For a trailing
-   //--- strategy this is the only position it will open until that one closes.
+   //--- The position opens at market, with its stop already attached: it has
+   //--- no other exit, so it is never left without one while it waits to
+   //--- reach activation.
    //---
-   //--- This is also the re-entry: once a trailing stop takes a position out,
-   //--- the direction is flat again and the next pass opens it afresh. That is
+   //--- This is also the re-entry: once a trailing stop takes the position
+   //--- out, the account is flat again and a later pass opens afresh. That is
    //--- deliberate — a trailing strategy is meant to keep working the market,
-   //--- not to stop after one trade. Each side re-enters on its own, so a buy
-   //--- being stopped out does not disturb a sell that is still running.
-   if(basket.count == 0)
+   //--- not to stop after one trade.
+   int initial_stop = g_strategy.trailing_stop_points;
+
+   //--- Locked before the request, not after: whatever it returns, the next
+   //--- pass must not read the account as flat while it settles.
+   LockEntries(OPEN_COOLDOWN_SECONDS);
+   if(g_grid.OpenMarket(type, next_lot, StringFormat("GG:%I64d:L1", g_strategy.id), initial_stop))
      {
-      //--- A trailing position opens with its stop already attached: it has
-      //--- no other exit, so it is never left without one while it waits to
-      //--- reach activation.
-      int initial_stop = (g_strategy.category != CATEGORY_GRID) ? g_strategy.trailing_stop_points : 0;
-      //--- Locked before the request, not after: whatever it returns, the
-      //--- next pass must not read the account as flat while it settles.
-      if(SinglePositionMode())
-         LockEntries(OPEN_COOLDOWN_SECONDS);
-      if(g_grid.OpenMarket(type, next_lot, StringFormat("GG:%I64d:L1", g_strategy.id), initial_stop))
+      last_open_at[DirectionSlot(type)] = NowMs();
+      LogOpen(type, 1, next_lot);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| THE GRID: A LADDER OF STOP ORDERS, CLOSED TOGETHER.               |
+//|                                                                   |
+//| Each cycle rests `grid_buy_orders` Buy Stops above the market and |
+//| `grid_sell_orders` Sell Stops below it, `grid_spacing_points`     |
+//| apart. Rungs fill as price reaches them; the open positions are   |
+//| one basket, closed together when their combined floating profit   |
+//| reaches `basket_take_profit`; the rest of the ladder is cancelled,|
+//| the EA waits `grid_cycle_pause_seconds`, and a new cycle begins.  |
+//|                                                                   |
+//| What the EA is doing is held in g_cycle (Include/GoldGrid/        |
+//| Cycle.mqh), persisted across restarts and reconciled against the  |
+//| broker in INITIALIZING:                                           |
+//|                                                                   |
+//|   INITIALIZING --reconcile--> PLACING --ladder complete--> ARMED  |
+//|   PLACING / ARMED / RECOVERY --target reached--> CLOSING          |
+//|   CLOSING --confirmed flat--> COOLDOWN --pause over--> PLACING    |
+//|   INITIALIZING --ours on the broker, no cycle--> RECOVERY         |
+//|   RECOVERY --nothing of ours left--> COOLDOWN                     |
+//|                                                                   |
+//| DUPLICATE PROTECTION. Orders are sent from PLACING only. PLACING  |
+//| is entered from COOLDOWN after a confirmed flat, from             |
+//| INITIALIZING with a cycle adopted from the broker, or from ARMED  |
+//| when a rung is found missing. PlaceLadder itself only ever sends  |
+//| rungs that neither rest nor have filled, so even a pass repeated  |
+//| in the same instant (a tick storm) sends nothing twice.           |
+//|                                                                   |
+//| THE ANCHOR. The ladder is measured from one bid/ask, taken when   |
+//| the first rung is sent and fixed for the rest of the cycle (D5).  |
+//| Until that moment nothing is committed, so the anchor follows the |
+//| market: a strategy that starts during a gate — spread, session,   |
+//| stale configuration — does not place its ladder around a price    |
+//| from an hour ago when the gate opens.                             |
+//|                                                                   |
+//| THE CLOSE. Positions first, then every order, every pass, until   |
+//| the broker confirms each position closed and nothing of ours is   |
+//| left — a rung that fills mid-close is caught by the next pass.    |
+//| Nothing new is placed until then.                                 |
+//+------------------------------------------------------------------+
+#define LADDER_REQUESTS_PER_PASS 10
+//--- How long after a send before the broker's lists are trusted to show
+//--- it. Nothing is concluded from them meanwhile — no "rung missing", no
+//--- "nothing of ours left" — and nothing new is sent.
+#define LADDER_SEND_SETTLE_MS 2000
+//--- How long after OnInit before an empty account is believed to be empty.
+#define CYCLE_SETTLE_AFTER_START_MS 5000
+//--- A cycle whose close will not confirm, or whose orders will not cancel,
+//--- is reported at this interval.
+#define CYCLE_STUCK_REPORT_MS (5 * 60 * 1000)
+
+CCycleState g_cycle;
+
+//--- In-memory bookkeeping for the current run. A restart goes through
+//--- INITIALIZING, which rebuilds all of it from the broker and g_cycle.
+int    g_ladder_seen_picture  = -1;    // LadderPicture() at the last full pass
+ulong  g_ladder_last_send_ms  = 0;
+ulong  g_ladder_checked_ms    = 0;
+int    g_ladder_skipped       = 0;     // rungs the last pass found crossed
+ulong  g_ladder_empty_since   = 0;     // the broker has shown nothing of ours since
+bool   g_ladder_capacity_cut  = false; // the last pass had less room than the ladder
+ulong  g_started_ms           = 0;     // OnInit, for the start-up settle
+string g_ladder_gate_note     = "";
+ENUM_CYCLE_STATE g_ladder_gate_state = CYCLE_INITIALIZING;   // where the note was set (GateNoteApplies)
+int    g_ladder_gate_cycle    = 0;
+//--- Close passes are 2 s apart, so an asynchronous close still executing is
+//--- not sent again; a close the broker refused outright is retried after
+//--- 500 ms (NoteCloseRejection).
+#define CLOSE_RETRY_PACE_MS            2000
+#define CLOSE_RETRY_AFTER_REJECTION_MS 500
+#define CLOSE_FAST_RETRIES_MAX         3      // per close; then the 2 s pace
+int    g_close_fast_retries   = 0;
+int    g_close_passes         = 0;
+uint   g_close_reject_code    = 0;            // last rejection printed, for the log throttle
+ulong  g_close_reject_ms      = 0;
+int    g_close_reject_quiet   = 0;            // rejections not printed since
+bool   g_ladder_gate_entry    = false;        // the note is an entry gate (halt, stopped, ...)
+string g_cycle_close_reason   = "";
+ulong  g_cycle_close_attempt  = 0;
+ulong  g_cycle_stuck_reported = 0;
+int    g_cycle_close_cancelled = 0;
+//--- Tester statistics.
+int    g_ladder_max_orders    = 0;
+int    g_ladder_requests      = 0;
+double g_ladder_closed_profit = 0.0;
+
+void ManageGridCycle()
+  {
+   //--- THE MONITOR runs first, in every state but CLOSING itself. A basket
+   //--- at its target is closed whether or not anything may be placed —
+   //--- in RECOVERY too.
+   if(!g_cycle.Is(CYCLE_CLOSING) && !g_cycle.Is(CYCLE_INITIALIZING))
+     {
+      SBasket basket = g_grid.CombinedBasket();
+      string  why    = g_grid.BasketExitReason(g_strategy, basket);
+      if(why != "")
         {
-         last_open_at[DirectionSlot(type)] = NowMs();
-         LogOpen(type, 1, next_lot);
+         //--- A close is an order, and the master switch means none is sent.
+         if(!InpAllowTrading)
+           {
+            NoteGridGate(StringFormat("%s, but AllowTrading is off — not closing", why));
+            return;
+           }
+         BeginCycleClose(why, basket);
         }
+     }
+
+   switch(g_cycle.State())
+     {
+      case CYCLE_INITIALIZING: ReconcileCycle();  return;
+      case CYCLE_CLOSING:      CloseCycle();      return;
+      case CYCLE_COOLDOWN:     CooldownCycle();   return;
+      case CYCLE_RECOVERY:     RecoverCycle();    return;
+      case CYCLE_PLACING:
+      case CYCLE_ARMED:        PlaceCycle();      return;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| INITIALIZING: the persisted cycle meets the broker.               |
+//|                                                                   |
+//|   ours on the broker, cycle readable  -> adopt it, PLACING        |
+//|   ours on the broker, no cycle        -> RECOVERY                 |
+//|   nothing of ours, pause remaining    -> COOLDOWN                 |
+//|   nothing of ours, first run ever     -> cycle 1, PLACING         |
+//|   nothing of ours, a cycle on record  -> it ended outside the EA  |
+//|                                          (a risk halt, a manual   |
+//|                                          close): next cycle,      |
+//|                                          COOLDOWN                 |
+//+------------------------------------------------------------------+
+void ReconcileCycle()
+  {
+   //--- Nothing can be concluded from empty lists before the terminal has
+   //--- its account data: a start alongside the terminal, or a reconnect,
+   //--- shows no orders and no positions for a moment, and "nothing of ours"
+   //--- would retire a live cycle and place a second ladder over it.
+   if(!IsTester() && !TerminalInfoInteger(TERMINAL_CONNECTED))
+     {
+      NoteGridGate("waiting for the terminal to connect before reading the account");
+      return;
+     }
+   if(!IsTester() && NowMs() - g_started_ms < CYCLE_SETTLE_AFTER_START_MS)
+      return;
+
+   int orders    = g_grid.OurOrders();
+   int positions = g_grid.TotalPositions();
+
+   if(orders + positions > 0)
+     {
+      int      number;
+      double   bid, ask;
+      datetime since;
+      //--- The record's shape (gap, first offset) describes the record's
+      //--- cycle; the broker's rungs are read with it first, and with the
+      //--- live configuration if they turn out to belong to another cycle.
+      SGridStrategy shape = LadderShape();
+      int  first_hint = g_cycle.Anchored() ? g_cycle.FirstPoints() : 0;
+      bool readable   = g_grid.RecoverLadder(shape, first_hint, number, bid, ask, since);
+      if(readable && number != g_cycle.Number())
+         readable = g_grid.RecoverLadder(g_strategy, 0, number, bid, ask, since);
+
+      if(readable && number < g_cycle.Number())
+        {
+         //--- Rungs of a cycle the record has already retired: its basket
+         //--- was confirmed flat and the number advanced, and these orders
+         //--- were listed late. They are leftovers, not a cycle to resume —
+         //--- adopting them would roll the number back and re-place a ladder
+         //--- whose basket is gone. COOLDOWN withdraws orders; positions, if
+         //--- any, belong to no live cycle and go through RECOVERY.
+         PrintFormat("GoldGrid: %d order(s) and %d position(s) carry cycle %d, but the record is already on "
+                     "cycle %d — treated as leftovers", orders, positions, number, g_cycle.Number());
+         if(positions > 0)
+            g_cycle.Set(CYCLE_RECOVERY, StringFormat("positions of retired cycle %d are still open", number));
+         else
+            g_cycle.Set(CYCLE_COOLDOWN, StringFormat("orders of retired cycle %d are still resting", number));
+         return;
+        }
+
+      if(readable)
+        {
+         if(number != g_cycle.Number() || !g_cycle.Anchored())
+           {
+            PrintFormat("GoldGrid: the broker's orders say cycle %d anchored at %s/%s; the record said cycle %d%s — "
+                        "the broker wins", number, DoubleToString(bid, _Digits), DoubleToString(ask, _Digits),
+                        g_cycle.Number(), g_cycle.Anchored() ? "" : " with no anchor");
+            //--- The record's shape is kept when it was made for this very
+            //--- cycle; otherwise the live configuration is the best guess.
+            bool same = number == g_cycle.Number() && g_cycle.Anchored() && g_cycle.Gap() > 0;
+            g_cycle.Adopt(number, bid, ask,
+                          same ? g_cycle.Gap()       : g_strategy.grid_spacing_points,
+                          same ? g_cycle.BuyRungs()  : g_strategy.grid_buy_orders,
+                          same ? g_cycle.SellRungs() : g_strategy.grid_sell_orders,
+                          same ? g_cycle.FirstPoints() : g_grid.FirstRungPoints(g_strategy.grid_spacing_points),
+                          same && g_cycle.Lot() > 0.0 ? g_cycle.Lot() : EntryLot(g_strategy, _Symbol), since);
+           }
+        }
+      else if(g_cycle.Number() > 0 && g_cycle.Anchored())
+        {
+         //--- Comments stripped by the broker, or only positions without a
+         //--- ladder comment remain (a chaos injection, a manual trade with
+         //--- our magic): the record is all there is, and it is enough.
+         PrintFormat("GoldGrid: %d order(s) and %d position(s) of ours carry no readable cycle — continuing "
+                     "cycle %d from the record, anchored at %s/%s", orders, positions, g_cycle.Number(),
+                     DoubleToString(g_cycle.AnchorBid(), _Digits), DoubleToString(g_cycle.AnchorAsk(), _Digits));
+        }
+      else
+        {
+         g_cycle.Set(CYCLE_RECOVERY, StringFormat("%d order(s) and %d position(s) of ours on the broker, but no cycle "
+                                                  "can be reconstructed from them or from the record", orders, positions));
+         return;
+        }
+
+      //--- Rungs that filled before the restart, open or since closed, so
+      //--- none is placed twice in the cycle (D6).
+      g_grid.RebuildFilled(g_strategy.id, g_cycle.Number(), g_cycle.AnchorAt());
+      ResetLadderMemory();
+
+      //--- A close that was interrupted is a close, not a ladder to complete:
+      //--- the cycle's orders are gone, part of its basket may be, and
+      //--- re-placing the ladder would run half a basket on indefinitely.
+      if(g_cycle.Previous() == CYCLE_CLOSING)
+        {
+         BeginCycleClose("resumed after a restart — the close had begun", g_grid.CombinedBasket());
+         return;
+        }
+      if(g_cycle.Previous() == CYCLE_RECOVERY)
+        {
+         g_cycle.Set(CYCLE_RECOVERY, "the record says RECOVERY, and something of ours is still on the broker");
+         return;
+        }
+
+      g_cycle.Set(CYCLE_PLACING, StringFormat("cycle %d adopted from the broker — %d order(s) resting, %d position(s) "
+                                              "open, %d rung(s) filled so far", g_cycle.Number(), orders, positions,
+                                              g_grid.FilledCount(g_cycle.Number())));
       return;
      }
 
-   //--- Subsequent levels open only once price has travelled a full grid step
-   //--- beyond the furthest existing entry.
-   double step = g_strategy.grid_spacing_points * _Point;
-   double trigger = (type == POSITION_TYPE_BUY)
-                    ? basket.worst_price - step
-                    : basket.worst_price + step;
+   if(g_cycle.PauseRemaining(g_strategy.grid_cycle_pause_seconds) > 0)
+     {
+      g_cycle.Set(CYCLE_COOLDOWN, StringFormat("flat; %d s of the pause before cycle %d remain",
+                                               (int)g_cycle.PauseRemaining(g_strategy.grid_cycle_pause_seconds),
+                                               g_cycle.Number()));
+      return;
+     }
 
-   bool reached = (type == POSITION_TYPE_BUY) ? (ask <= trigger) : (bid >= trigger);
-   if(!reached)
+   if(g_cycle.Number() == 0)
+     {
+      g_cycle.Begin();
+      ResetLadderMemory();
+      g_cycle.Set(CYCLE_PLACING, "first cycle");
+      return;
+     }
+
+   if(g_cycle.Anchored())
+     {
+      //--- A cycle was under way and nothing of it is left: it ended without
+      //--- the EA seeing the end. Its number is retired so its comments are
+      //--- never reused, and the pause applies as after any close.
+      g_cycle.NextCycle(g_strategy.grid_cycle_pause_seconds);
+      g_cycle.Set(CYCLE_COOLDOWN, StringFormat("cycle %d ended outside the EA (nothing of ours on the broker); "
+                                               "cycle %d after the pause", g_cycle.Number() - 1, g_cycle.Number()));
+      return;
+     }
+
+   //--- A cycle number but no anchor: the previous run never sent a rung.
+   g_cycle.EndPause();
+   ResetLadderMemory();
+   g_cycle.Set(CYCLE_PLACING, StringFormat("cycle %d had not placed anything yet", g_cycle.Number()));
+  }
+
+//--- The strategy as the ladder sees it: the shape the cycle anchored with
+//--- (D8 corollary — a setting changed on the platform applies to the next
+//--- cycle), the rest of the configuration live.
+SGridStrategy LadderShape()
+  {
+   SGridStrategy shape = g_strategy;
+   if(g_cycle.Anchored() && g_cycle.Gap() > 0)
+     {
+      shape.grid_spacing_points = g_cycle.Gap();
+      shape.grid_buy_orders     = g_cycle.BuyRungs();
+      shape.grid_sell_orders    = g_cycle.SellRungs();
+      if(g_cycle.Lot() > 0.0)
+         shape.initial_lot      = g_cycle.Lot();
+     }
+   return shape;
+  }
+
+//+------------------------------------------------------------------+
+//| PLACING and ARMED. Hygiene, then the ladder; the monitor has      |
+//| already run. ARMED re-checks the ladder when the picture changes, |
+//| or once a second while a skipped rung might have come back into   |
+//| reach, and goes back to PLACING if a rung is missing.             |
+//+------------------------------------------------------------------+
+void PlaceCycle()
+  {
+   if(!InpAllowTrading || halted)
+     {
+      NoteGridGate(halted ? halt_reason : "AllowTrading is off", true);
+      return;
+     }
+
+   //--- A ladder is two baskets side by side; a netting account would turn a
+   //--- buy fill and a sell fill into one flat position.
+   if(!g_grid.AccountIsHedging())
+     {
+      NoteGridGate(TradeGateReason(GATE_NETTING_OPPOSITE), true);
+      return;
+     }
+
+   //--- STOPPED ON THE PLATFORM. A resting rung is nothing but a future
+   //--- entry, and "stopped" means no new entries: the rungs are withdrawn.
+   //--- The open basket is not touched — the monitor above keeps closing it
+   //--- at its target, consistent with "stopping is not close everything".
+   //--- When the strategy is started again the cycle resumes here: with a
+   //--- basket still open, its missing rungs are re-placed at the same
+   //--- anchor; with nothing left, the cycle is retired below.
+   if(!g_strategy.IsRunning())
+     {
+      if(g_grid.OurOrders() > 0 && NowMs() - g_cycle_close_attempt >= CLOSE_RETRY_PACE_MS)
+        {
+         g_cycle_close_attempt = NowMs();
+         //--- Sent in parallel: one reply at a time, a 50-rung ladder held
+         //--- this pass, and the open basket's target with it, for seconds.
+         int withdrawn = g_grid.DeleteAllOrders(true);
+         if(withdrawn > 0)
+            PrintFormat("GoldGrid: the strategy is stopped — withdrawing %d resting ladder order(s); %d open position(s) "
+                        "keep their basket target", withdrawn, g_grid.TotalPositions());
+        }
+      NoteGridGate(g_grid.TotalPositions() > 0 ? "the strategy is stopped — the open basket is managed, nothing new rests"
+                                               : "the strategy is stopped", true);
+      return;
+     }
+
+   //--- Every entry gate is open again: a note one of them left is no longer
+   //--- true. Cleared here, ahead of the early returns below — an ARMED
+   //--- ladder whose picture did not change would otherwise go on reporting
+   //--- "the strategy is stopped" after it was started again.
+   if(g_ladder_gate_entry)
+     {
+      g_ladder_gate_note  = "";
+      g_ladder_gate_entry = false;
+     }
+
+   //--- The broker's lists lag a send by up to a few hundred milliseconds,
+   //--- and ticks can arrive faster than that. Until a send has settled
+   //--- nothing is concluded from the lists: no "rung missing", no "nothing
+   //--- of ours left", no second copy of a rung that is simply not listed
+   //--- yet. (The tester's lists update synchronously; live they do not.)
+   bool settled = NowMs() - g_ladder_last_send_ms >= LADDER_SEND_SETTLE_MS;
+   if(!settled)
       return;
 
-   if(g_grid.OpenMarket(type, next_lot, StringFormat("GG:%I64d:L%d", g_strategy.id, next_level)))
+   SGridStrategy shape = LadderShape();
+
+   //--- A committed cycle with nothing left on the broker ended outside the
+   //--- EA — a risk halt cancelled and closed everything, or the user did.
+   //--- Believed only once the empty picture has held for a few seconds with
+   //--- the terminal connected: on a reconnect the lists blink empty for a
+   //--- moment, and retiring a live cycle on that would place a second ladder
+   //--- beside its basket.
+   bool empty = g_grid.OurOrders() == 0 && g_grid.TotalPositions() == 0 &&
+                (IsTester() || TerminalInfoInteger(TERMINAL_CONNECTED));
+   if(!empty)
+      g_ladder_empty_since = 0;
+   else if(g_ladder_empty_since == 0)
+      g_ladder_empty_since = NowMs();
+   if(g_cycle.Anchored() && empty)
      {
-      last_open_at[DirectionSlot(type)] = NowMs();
-      LogOpen(type, next_level, next_lot);
+      if(NowMs() - g_ladder_empty_since < CYCLE_SETTLE_AFTER_START_MS)
+         return;
+      g_cycle.NextCycle(g_strategy.grid_cycle_pause_seconds);
+      g_cycle.Set(CYCLE_COOLDOWN, StringFormat("cycle %d ended outside the EA (nothing of ours left on the broker); "
+                                               "cycle %d after the pause", g_cycle.Number() - 1, g_cycle.Number()));
+      return;
+     }
+
+   //--- A complete ladder is only re-checked when something changed: a fill
+   //--- or a cancel moves the order or position picture — or, with a rung
+   //--- skipped, once a second, in case the market has come back to its side.
+   //--- Sixty rungs against sixty orders on every tick would be a lot of
+   //--- reading for nothing. The same while the risk gate (or the broker)
+   //--- refuses: re-asked once a second, not on every tick.
+   bool same_picture = LadderPicture() == g_ladder_seen_picture;
+   bool due          = NowMs() - g_ladder_checked_ms >= 1000;
+   //--- A ladder cut by the broker's order limit is re-checked once a minute
+   //--- as well, in case other orders on the account have gone and room has
+   //--- opened up.
+   bool cut_due      = g_ladder_capacity_cut && NowMs() - g_ladder_checked_ms >= 60000;
+   if(g_cycle.Is(CYCLE_ARMED) && same_picture && !(g_ladder_skipped > 0 && due) && !cut_due)
+      return;
+   if(g_cycle.Is(CYCLE_PLACING) && same_picture && g_ladder_gate_note != "" && !due)
+      return;
+   g_ladder_checked_ms = NowMs();
+
+   //--- Nothing of ours rests but rungs of this cycle. Checked here, behind
+   //--- the pacing above, rather than on every tick.
+   if(g_grid.DeleteLadderStrays(shape, g_cycle.Number()) > 0)
+      g_ladder_seen_picture = -1;
+
+   //--- Until the first rung is sent, the ladder is measured from the market
+   //--- as it is now.
+   double anchor_bid = g_cycle.Anchored() ? g_cycle.AnchorBid() : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double anchor_ask = g_cycle.Anchored() ? g_cycle.AnchorAsk() : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   int    first      = g_cycle.Anchored() && g_cycle.FirstPoints() > 0
+                       ? g_cycle.FirstPoints() : g_grid.FirstRungPoints(shape.grid_spacing_points);
+
+   //--- ARMED only looks (a request budget of zero); a missing rung sends it
+   //--- back to PLACING, the one state that places.
+   int budget = g_cycle.Is(CYCLE_PLACING) ? LADDER_REQUESTS_PER_PASS : 0;
+
+   SLadderReport report;
+   bool complete = g_grid.PlaceLadder(shape, ConfigurationIsFresh(), g_cycle.Number(),
+                                      anchor_bid, anchor_ask, first, budget, report);
+   g_ladder_requests += report.placed;
+   g_ladder_skipped   = report.skipped;
+   g_ladder_capacity_cut = report.capacity < shape.LadderSize();
+   if(report.requests > 0)
+      g_ladder_last_send_ms = NowMs();
+
+   if(report.placed > 0 && !g_cycle.Anchored())
+     {
+      g_cycle.Anchor(anchor_bid, anchor_ask, shape.grid_spacing_points, shape.grid_buy_orders,
+                     shape.grid_sell_orders, first, EntryLot(shape, _Symbol));
+      PrintFormat("GoldGrid: ladder cycle %d anchored at %s/%s — %d Buy Stop(s) above, %d Sell Stop(s) below, "
+                  "%d points apart (rung 1 at %d), %.2f lots each, capacity %d",
+                  g_cycle.Number(), DoubleToString(anchor_bid, _Digits), DoubleToString(anchor_ask, _Digits),
+                  shape.grid_buy_orders, shape.grid_sell_orders, shape.grid_spacing_points, first,
+                  EntryLot(shape, _Symbol), report.capacity);
+     }
+   //--- Rungs held without a persisted anchor: only a position matched by
+   //--- the comment-less fallback can bring this about (RecoverLadder
+   //--- anchored every readable case in INITIALIZING).
+   if(report.resting + report.held > 0 && !g_cycle.Anchored())
+      g_cycle.Anchor(anchor_bid, anchor_ask, shape.grid_spacing_points, shape.grid_buy_orders,
+                     shape.grid_sell_orders, first, EntryLot(shape, _Symbol));
+
+   if(report.refused != "")
+      NoteGridGate(report.refused);
+   else
+      g_ladder_gate_note = "";
+
+   g_ladder_seen_picture = LadderPicture();
+   g_ladder_max_orders   = MathMax(g_ladder_max_orders, g_grid.OurOrders());
+
+   if(complete && g_cycle.Is(CYCLE_PLACING))
+      g_cycle.Set(CYCLE_ARMED, StringFormat("ladder complete — %d resting, %d filled, %d skipped, capacity %d",
+                                            report.resting + report.placed, report.held, report.skipped, report.capacity));
+   else if(!complete && g_cycle.Is(CYCLE_ARMED) && report.refused == "")
+      g_cycle.Set(CYCLE_PLACING, "a rung is missing from the ladder");
+  }
+
+//+------------------------------------------------------------------+
+//| CLOSING. Entered by the monitor from any placing state.           |
+//+------------------------------------------------------------------+
+void BeginCycleClose(const string why, const SBasket &basket)
+  {
+   g_cycle_close_reason    = why;
+   g_cycle_close_attempt   = 0;
+   g_close_fast_retries    = 0;
+   g_close_passes          = 0;
+   g_close_reject_code     = 0;
+   g_close_reject_quiet    = 0;
+   g_cycle_stuck_reported  = 0;
+   g_cycle_close_cancelled = 0;
+   g_grid.BeginBasketClose();
+   PrintFormat("GoldGrid: ladder cycle %d closing — %s; %d position(s), %.2f lots, %d order(s) resting, "
+               "spread %I64d points", g_cycle.Number(), why, basket.count, basket.volume, g_grid.OurOrders(),
+               SymbolInfoInteger(_Symbol, SYMBOL_SPREAD));
+   g_cycle.Set(CYCLE_CLOSING, why);
+  }
+
+//--- One pass of the close, paced so a broker that keeps rejecting is not
+//--- hammered on every tick; then confirmation; then the next cycle is set
+//--- up behind the pause.
+void CloseCycle()
+  {
+   if(g_grid.TotalPositions() > 0 || g_grid.OurOrders() > 0)
+     {
+      if(!InpAllowTrading)
+        {
+         NoteGridGate("closing, but AllowTrading is off — nothing is sent");
+         return;
+        }
+      if(NowMs() - g_cycle_close_attempt < CLOSE_RETRY_PACE_MS)
+         return;
+      g_cycle_close_attempt = NowMs();
+
+      int closes = 0, cancelled = 0;
+      int failed = g_grid.CloseBasketPass(g_cycle_close_reason, closes, cancelled);
+      g_close_passes++;
+      if(g_close_passes == 1)
+         g_cycle_close_cancelled = cancelled;   // a retry's cancels are mostly repeats
+      if(closes + cancelled > 0)
+         PrintFormat("GoldGrid: close pass %d — %d close(s) and %d cancel(s) sent together", g_close_passes, closes,
+                     cancelled);
+      if(failed > 0)
+         PrintFormat("GoldGrid: %d close(s) could not be sent — retrying", failed);
+      ReportIfStuck("the close has not completed");
+      return;
+     }
+
+   if(!g_grid.BasketConfirmedFlat())
+     {
+      //--- The open list is empty but the history has not shown every close
+      //--- yet. Normally a pass or two; a user has to hear about longer.
+      ReportIfStuck("the broker's history does not yet confirm every close");
+      return;
+     }
+
+   double realised = g_grid.ClosedBasketProfit();
+   g_ladder_closed_profit += realised;
+   PrintFormat("GoldGrid: ladder cycle %d flat — %d position(s) closed for %.2f, %d order(s) cancelled, %s; "
+               "cycle %d in %d s", g_cycle.Number(), g_grid.ClosingPositions(), realised, g_cycle_close_cancelled,
+               g_cycle_close_reason, g_cycle.Number() + (g_cycle.Anchored() ? 1 : 0),
+               g_strategy.grid_cycle_pause_seconds);
+
+   //--- A basket closed under a cycle that never placed a ladder (a position
+   //--- that appeared by hand during COOLDOWN, or positions found in RECOVERY
+   //--- before any cycle existed) keeps the cycle number: there are no
+   //--- comments of this number to retire. A number of 0 is never kept — a
+   //--- ladder commented C0 could not be recovered after a restart.
+   if(g_cycle.Anchored())
+      g_cycle.NextCycle(g_strategy.grid_cycle_pause_seconds);
+   else
+     {
+      if(g_cycle.Number() == 0)
+         g_cycle.Begin();
+      g_cycle.RestartPause(g_strategy.grid_cycle_pause_seconds);
+     }
+   g_cycle.Set(CYCLE_COOLDOWN, StringFormat("confirmed flat; pausing %d s", g_strategy.grid_cycle_pause_seconds));
+  }
+
+void ReportIfStuck(const string what)
+  {
+   if(g_cycle.MsInState() < CYCLE_STUCK_REPORT_MS || NowMs() - g_cycle_stuck_reported < CYCLE_STUCK_REPORT_MS)
+      return;
+   PrintFormat("GoldGrid: cycle %d has been %s for %d min — %s, so nothing new is placed. "
+               "Check the account in MetaTrader.", g_cycle.Number(), g_cycle.Name(),
+               (int)(g_cycle.MsInState() / 60000), what);
+   g_cycle_stuck_reported = NowMs();
+  }
+
+//+------------------------------------------------------------------+
+//| COOLDOWN. The pause is wall-clock and persisted, so a restart does |
+//| not shorten it (and a quiet market does not stretch it).          |
+//+------------------------------------------------------------------+
+void CooldownCycle()
+  {
+   //--- Nothing of ours may rest between cycles: an order that appears now
+   //--- (a leftover, a duplicate request that landed late, a stray with our
+   //--- magic) would be an entry nobody decided on, and it would fill while
+   //--- the next ladder is being measured.
+   if(InpAllowTrading && g_grid.OurOrders() > 0 && NowMs() - g_cycle_close_attempt >= CLOSE_RETRY_PACE_MS)
+     {
+      g_cycle_close_attempt = NowMs();
+      int withdrawn = g_grid.DeleteAllOrders(true);
+      if(withdrawn > 0)
+         PrintFormat("GoldGrid: withdrawing %d order(s) of ours that appeared during the pause", withdrawn);
+     }
+
+   if(g_cycle.PauseRemaining(g_strategy.grid_cycle_pause_seconds) > 0)
+      return;
+   //--- The withdrawals above are sent asynchronously: not left until they
+   //--- have gone, or the new ladder would be measured against them.
+   if(InpAllowTrading && g_grid.OurOrders() > 0)
+      return;
+   //--- The pause is over, but a new cycle is a new set of entries, and a
+   //--- halt or a stopped strategy forbids those. Waiting here rather than in
+   //--- PLACING keeps the ladder from being anchored and refused every pass.
+   string halt = RiskHaltReason();
+   if(halt != "")
+     {
+      NoteGridGate(StringFormat("pause over, but a risk halt is in force — %s", halt));
+      return;
+     }
+   if(!g_strategy.IsRunning())
+     {
+      NoteGridGate("pause over, but the strategy is stopped — no new cycle");
+      return;
+     }
+   g_cycle.EndPause();
+   if(g_cycle.Number() == 0)
+      g_cycle.Begin();                            // never place as cycle 0
+   ResetLadderMemory();
+   g_cycle.Set(CYCLE_PLACING, StringFormat("pause over — cycle %d", g_cycle.Number()));
+  }
+
+//+------------------------------------------------------------------+
+//| RECOVERY. Something of ours is on the broker and belongs to no    |
+//| cycle. Nothing is placed. Orders of ours are withdrawn (an order  |
+//| without a cycle is an entry nobody decided on); positions are     |
+//| left to the monitor, which closes the basket at its target like   |
+//| any other. Once nothing of ours remains, the loop resumes with a  |
+//| new cycle after the pause.                                        |
+//+------------------------------------------------------------------+
+void RecoverCycle()
+  {
+   if(InpAllowTrading && g_grid.OurOrders() > 0 && NowMs() - g_cycle_close_attempt >= CLOSE_RETRY_PACE_MS)
+     {
+      g_cycle_close_attempt = NowMs();
+      int cancelled = g_grid.DeleteAllOrders(true);
+      if(cancelled > 0)
+         PrintFormat("GoldGrid: RECOVERY — withdrawing %d order(s) that belong to no cycle", cancelled);
+     }
+
+   if(g_grid.OurOrders() == 0 && g_grid.TotalPositions() == 0)
+     {
+      if(g_cycle.Number() == 0)
+        {
+         g_cycle.Begin();
+         g_cycle.RestartPause(g_strategy.grid_cycle_pause_seconds);
+        }
+      else
+         g_cycle.NextCycle(g_strategy.grid_cycle_pause_seconds);
+      g_cycle.Set(CYCLE_COOLDOWN, StringFormat("recovered — nothing of ours left; cycle %d after the pause",
+                                               g_cycle.Number()));
+      return;
+     }
+
+   ReportIfStuck(StringFormat("%d position(s) of ours belong to no cycle and the basket is below its target",
+                              g_grid.TotalPositions()));
+  }
+
+//--- The per-run bookkeeping a new or adopted cycle starts with.
+void ResetLadderMemory()
+  {
+   g_ladder_seen_picture = -1;
+   g_ladder_checked_ms   = 0;
+   g_ladder_skipped      = 0;
+   g_ladder_empty_since  = 0;
+   g_ladder_gate_note    = "";
+  }
+
+//--- Orders and positions in one number, so a fill (one fewer order, one
+//--- more position) reads as a change and not as the same total.
+int LadderPicture()
+  {
+   return g_grid.OurOrders() * 100000 + g_grid.TotalPositions();
+  }
+
+//--- Close-only mode: risk halts and the basket's exits act, and a close in
+//--- progress continues; nothing is placed and no new cycle starts.
+void ManageGridCloseOnly()
+  {
+   if(EnforceRiskHalts())
+      return;
+   if(!g_cycle.Is(CYCLE_CLOSING) && !g_cycle.Is(CYCLE_INITIALIZING))
+     {
+      SBasket basket = g_grid.CombinedBasket();
+      string  why    = g_grid.BasketExitReason(g_strategy, basket);
+      if(why != "" && InpAllowTrading)
+         BeginCycleClose(why, basket);
+     }
+   if(g_cycle.Is(CYCLE_CLOSING))
+      CloseCycle();
+  }
+
+//--- Prints why the ladder is not being placed, once per change of reason.
+//--- The note is also the report's execution reason while it applies — only
+//--- in the cycle state and cycle it was set in (GateNoteApplies), so a note
+//--- from an earlier state never describes a later one.
+void NoteGridGate(const string reason, const bool entry_gate = false)
+  {
+   g_ladder_gate_state = g_cycle.State();
+   g_ladder_gate_cycle = g_cycle.Number();
+   g_ladder_gate_entry = entry_gate;
+   if(reason == g_ladder_gate_note)
+      return;
+   PrintFormat("GoldGrid: ladder not placed — %s", reason);
+   g_ladder_gate_note = reason;
+  }
+
+bool GateNoteApplies()
+  {
+   return g_ladder_gate_note != "" && g_ladder_gate_state == g_cycle.State() &&
+          g_ladder_gate_cycle == g_cycle.Number();
+  }
+
+//--- A close or cancel of the basket close that the broker refused. A close
+//--- refused outright (a requote, off quotes, a price that moved) leaves a
+//--- position open while the price moves, so the next close pass is brought
+//--- forward to 500 ms from now instead of the usual 2 s. "Position already
+//--- closed" is not a failure: a retry pass can reach a position whose first
+//--- close was still executing.
+//---
+//--- Only a PRICE rejection (requote, price changed, off quotes) earns the
+//--- early retry, at most CLOSE_FAST_RETRIES_MAX times per close: those
+//--- clear on the next quote. Anything else (no money, dealer reject, too
+//--- many requests, market closed) keeps the 2 s pace, so a broker that keeps
+//--- refusing is not hammered — "too many requests" in particular would only
+//--- feed itself. The log line is throttled: the first of each kind at once,
+//--- then at most one every 5 s with a count of those not printed.
+void NoteCloseRejection(const MqlTradeRequest &request, const MqlTradeResult &result)
+  {
+   uint code = result.retcode;
+   if(code == TRADE_RETCODE_DONE || code == TRADE_RETCODE_DONE_PARTIAL || code == TRADE_RETCODE_PLACED ||
+      code == TRADE_RETCODE_POSITION_CLOSED)
+      return;
+
+   bool  cancel = request.action == TRADE_ACTION_REMOVE;
+   ulong now    = NowMs();
+   if(code != g_close_reject_code || now - g_close_reject_ms >= 5000)
+     {
+      PrintFormat("GoldGrid: %s #%I64u REJECTED by the broker, retcode %u%s%s",
+                  cancel ? "cancel of order" : "close of position", cancel ? request.order : request.position, code,
+                  result.comment == "" ? "" : " (" + result.comment + ")",
+                  g_close_reject_quiet > 0 ? StringFormat("; %d more rejection(s) since the last line", g_close_reject_quiet) : "");
+      g_close_reject_code  = code;
+      g_close_reject_ms    = now;
+      g_close_reject_quiet = 0;
+     }
+   else
+      g_close_reject_quiet++;
+
+   if(cancel)
+      return;
+   bool price_moved = code == TRADE_RETCODE_REQUOTE || code == TRADE_RETCODE_PRICE_CHANGED ||
+                      code == TRADE_RETCODE_PRICE_OFF;
+   if(!price_moved || g_close_fast_retries >= CLOSE_FAST_RETRIES_MAX)
+      return;
+   ulong pull = CLOSE_RETRY_PACE_MS - CLOSE_RETRY_AFTER_REJECTION_MS;
+   if(now > pull && now - g_cycle_close_attempt < pull)
+     {
+      g_cycle_close_attempt = now - pull;
+      g_close_fast_retries++;
      }
   }
 
@@ -1165,6 +1954,20 @@ void ManageReversal()
       return;
 
    int held = buys.count + sells.count;
+
+   //--- Just closed at the exit: the opposite stop may be filling this very
+   //--- moment. Nothing is touched until it has had time to arrive; after
+   //--- that, whatever still rests is withdrawn.
+   if(held > 0)
+      exit_settling_since = 0;
+   else if(exit_settling_since > 0)
+     {
+      if(NowMs() - exit_settling_since < EXIT_SETTLE_MS)
+         return;
+      exit_settling_since = 0;
+      if(InpAllowTrading)
+         g_grid.DeleteAllPendingStops();
+     }
 
    //--- Before the break: flat, nothing resting. After the reopen: no bracket
    //--- until the spread has had time to settle.
@@ -1197,7 +2000,7 @@ void ManageReversal()
    //--- Flat: bracket the market. An order already resting on a side stays
    //--- where it is and only a missing side is added.
    bool   may_trade = !halted && InpAllowTrading;
-   double lot       = GridLotForLevel(g_strategy, 1, _Symbol);
+   double lot       = EntryLot(g_strategy, _Symbol);
    string reason;
    if(!may_trade ||
       !g_grid.MayOpen(g_strategy, ConfigurationIsFresh(), lot, POSITION_TYPE_BUY, reason, true))
@@ -1273,7 +2076,9 @@ bool BracketOrderIsStale(const ENUM_POSITION_TYPE side, const string expected, c
    double volume = g_grid.PendingStopVolume(side);
    if(volume > 0.0 && MathAbs(volume - lot) > 0.000001)
       return true;
-   if(g_grid.PendingStopHasStopLoss(side))
+   //--- Every bracket order carries the stop loss its position opens with.
+   //--- One placed by an earlier build does not.
+   if(volume > 0.0 && !g_grid.PendingStopHasStopLoss(side))
       return true;
 
    string comment = g_grid.PendingStopComment(side);
@@ -1325,10 +2130,15 @@ void PlaceBracket(const double lot, const double bid, const double ask)
 
    //--- 4. Only a missing side is added. A resting side is never moved while
    //---    flat: it may be the one filling at this very moment.
+   //---    Each carries the stop loss its position opens with, so the position
+   //---    is protected by the broker from the instant it fills.
+   double exit = g_grid.ExitDistance(g_strategy);
    if(g_grid.FindPendingStop(POSITION_TYPE_BUY) == 0)
-      g_grid.PlacePendingStop(POSITION_TYPE_BUY, lot, ask + distance, comment);
+      g_grid.PlacePendingStop(POSITION_TYPE_BUY, lot, ask + distance, comment,
+                              g_grid.EntryStopLoss(POSITION_TYPE_BUY, ask + distance, exit));
    if(g_grid.FindPendingStop(POSITION_TYPE_SELL) == 0)
-      g_grid.PlacePendingStop(POSITION_TYPE_SELL, lot, bid - distance, comment);
+      g_grid.PlacePendingStop(POSITION_TYPE_SELL, lot, bid - distance, comment,
+                              g_grid.EntryStopLoss(POSITION_TYPE_SELL, bid - distance, exit));
   }
 
 //--- Prints why nothing is being opened, once per change of reason.
@@ -1446,11 +2256,20 @@ string BuildReportJson()
    json += "\"spread_points\":" + IntegerToString(spread) + "},";
 
    //--- What the EA is doing, for the dashboard. Trailing and reversal report
-   //--- their state machine; a grid reports GRID. The reversal level is the
-   //--- price of the open position's opposite stop, "0" when there is none.
-   string state_name   = "GRID";
-   string state_reason = "";
+   //--- their state machine (State.mqh); the grid reports its cycle
+   //--- (Cycle.mqh) with the figures the Robot state card shows: the cycle
+   //--- number, rungs resting and filled, the basket's floating P/L against
+   //--- its target, and the seconds of pause left in COOLDOWN. The reversal
+   //--- level is the price of the open position's opposite stop, "0" when
+   //--- there is none. Figures a category does not have are sent as null.
+   string state_name   = g_cycle.Name();
+   //--- The cycle's reason names the last transition. While something keeps
+   //--- the ladder from being placed (the strategy stopped, trading off, a
+   //--- halt), that gate is what the user needs to read next to the state.
+   string state_reason = GateNoteApplies() ? g_ladder_gate_note : g_cycle.Reason();
    double level        = 0.0;
+   string cycle_json   = "null", resting_json = "null", filled_json = "null",
+          basket_json  = "null", pause_json   = "null";
    if(SinglePositionMode())
      {
       state_name   = g_state.Name();
@@ -1458,12 +2277,27 @@ string BuildReportJson()
       if(g_strategy.category == CATEGORY_REVERSAL && g_state.IsActive())
          level = g_grid.PendingStopPrice(g_state.Is(STATE_BUY_ACTIVE) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY);
      }
+   else if(g_strategy.loaded)
+     {
+      SBasket basket = g_grid.CombinedBasket();
+      cycle_json   = IntegerToString(g_cycle.Number());
+      resting_json = IntegerToString(g_grid.OurOrders());
+      filled_json  = IntegerToString(g_grid.RungPositions(g_cycle.Number()));
+      basket_json  = "\"" + DoubleToString(basket.profit, 2) + "\"";
+      pause_json   = IntegerToString(g_cycle.Is(CYCLE_COOLDOWN)
+                                     ? g_cycle.PauseRemaining(g_strategy.grid_cycle_pause_seconds) : 0);
+     }
    json += "\"execution\":{";
    json += "\"state\":\"" + JsonEscape(state_name) + "\",";
    json += "\"reason\":\"" + JsonEscape(state_reason) + "\",";
    json += "\"reversal_level\":\"" + DoubleToString(level, digits) + "\",";
    json += "\"daily_profit\":\"" + DoubleToString(g_grid.TodayProfit(), 2) + "\",";
-   json += "\"risk_halt\":\"" + JsonEscape(RiskHaltReason()) + "\"},";
+   json += "\"risk_halt\":\"" + JsonEscape(RiskHaltReason()) + "\",";
+   json += "\"cycle\":" + cycle_json + ",";
+   json += "\"resting_orders\":" + resting_json + ",";
+   json += "\"filled_orders\":" + filled_json + ",";
+   json += "\"basket_profit\":" + basket_json + ",";
+   json += "\"pause_seconds_left\":" + pause_json + "},";
 
    //--- All money values are sent as strings so the platform can parse them as
    //--- decimals. Sending them as JSON numbers would invite float rounding.
@@ -1603,8 +2437,10 @@ string BuildReportJson()
      }
    json += "],";
 
-   //--- Resting orders. Only a reversal strategy places any, but the list is
-   //--- always sent, so the platform clears whatever is no longer there.
+   //--- Resting orders: a reversal's bracket or trailing stop, a grid's
+   //--- ladder. The list is always sent, so the platform clears whatever is
+   //--- no longer there. The grid level is the ladder rung (0 for anything
+   //--- that is not one).
    json += "\"orders\":[";
    int orders_written = 0;
    for(int i = OrdersTotal() - 1; i >= 0; i--)
@@ -1632,6 +2468,7 @@ string BuildReportJson()
       json += "{";
       json += "\"ticket\":\"" + IntegerToString((long)ticket) + "\",";
       json += "\"order_type\":\"" + order_type + "\",";
+      json += "\"grid_level\":" + IntegerToString(LevelFromComment(OrderGetString(ORDER_COMMENT))) + ",";
       json += "\"volume\":\"" + DoubleToString(OrderGetDouble(ORDER_VOLUME_CURRENT), 2) + "\",";
       json += "\"price\":\"" + DoubleToString(OrderGetDouble(ORDER_PRICE_OPEN), digits) + "\",";
       json += "\"placed_at\":\"" + IsoTime((datetime)OrderGetInteger(ORDER_TIME_SETUP)) + "\"";
@@ -1641,17 +2478,6 @@ string BuildReportJson()
 
    json += "}";
    return json;
-  }
-
-//+------------------------------------------------------------------+
-//| Grid level is encoded in the order comment as "GG:<id>:L<n>".     |
-//+------------------------------------------------------------------+
-int LevelFromComment(const string comment)
-  {
-   int marker = StringFind(comment, ":L");
-   if(marker < 0)
-      return 0;
-   return (int)StringToInteger(StringSubstr(comment, marker + 2));
   }
 
 //+------------------------------------------------------------------+
@@ -1675,13 +2501,18 @@ int InitTester()
    g_grid.LoadPeakEquity();
    g_state.Configure(InpMagicNumber, _Symbol);
    g_state.Load();
+   g_started_ms = NowMs();
+   g_cycle.Configure(InpMagicNumber, _Symbol);
+   g_cycle.Load();
    last_quote_at = (datetime)SymbolInfoInteger(_Symbol, SYMBOL_TIME);
 
    BuildTesterStrategy(g_strategy, InpTestCategory, InpTestLot, InpTestTrailingPoints, InpTestStepPoints,
                        InpTestEntryPoints, InpTestMaxSpreadPoints, InpTestMaxDailyLoss,
-                       InpTestGridSpacingPoints, InpTestGridLevels);
+                       InpTestGridSpacingPoints, InpTestGridBuyOrders, InpTestGridSellOrders,
+                       InpTestGridTargetMoney, InpTestGridPauseSeconds);
    g_monitor.Configure(InpMagicNumber, _Symbol, g_strategy.category == CATEGORY_REVERSAL);
-   g_chaos.Configure(InpMagicNumber, _Symbol, InpChaosEveryMinutes, InpChaosSeed);
+   g_chaos.Configure(InpMagicNumber, _Symbol, InpChaosEveryMinutes, InpChaosSeed, InpChaosRestartOnly);
+   g_grid.SetOrderLimit(InpTestOrderLimit);
 
    if(!InpAllowTrading)
       Print("GoldGrid: AllowTrading is OFF — the tester run will place no orders.");
@@ -1705,15 +2536,52 @@ void SimulateRestart()
    last_recovery_attempt = 0;
    reversing_close_at    = 0;
    reversing_flat        = false;
+   exit_settling_since   = 0;
    risk_halt_noted       = "";
    last_gate_note        = "";
+   g_ladder_seen_picture = -1;
+   g_ladder_last_send_ms = 0;
+   g_ladder_checked_ms   = 0;
+   g_ladder_skipped      = 0;
+   g_ladder_empty_since  = 0;
+   g_ladder_gate_note    = "";
+   g_cycle_close_reason  = "";
+   g_grid.ForgetRunState();
+   g_cycle_close_attempt = 0;
+   g_cycle_stuck_reported = 0;
+   g_cycle_close_cancelled = 0;
    ENUM_EXEC_STATE previous = g_state.Load();
-   PrintFormat("GoldGrid: CHAOS restart — previous state %s, now %s", ExecStateName(previous), g_state.Name());
+   ENUM_CYCLE_STATE previous_cycle = g_cycle.Load();
+   if(g_strategy.category == CATEGORY_GRID)
+      PrintFormat("GoldGrid: CHAOS restart — cycle %d was %s, now %s", g_cycle.Number(),
+                  CycleStateName(previous_cycle), g_cycle.Name());
+   else
+      PrintFormat("GoldGrid: CHAOS restart — previous state %s, now %s", ExecStateName(previous), g_state.Name());
   }
 
 void TesterTick()
   {
    static int   reversal_entries_at_close = -1;
+
+   //--- The grid. The chaos engine's trade-side events (a manual close, an
+   //--- extra position with our magic, a stray order) are carried out by
+   //--- Due() itself and land on the ladder like anything a user might do by
+   //--- hand; a restart and a tick storm are performed here. The
+   //--- single-position invariants below do not apply to it — CheckGrid
+   //--- holds the ladder's own.
+   if(g_strategy.category == CATEGORY_GRID)
+     {
+      ENUM_CHAOS_EVENT event = g_chaos.Due(g_monitor, g_strategy.grid_spacing_points);
+      if(event == CHAOS_RESTART)
+         SimulateRestart();
+      else if(event == CHAOS_TICK_STORM)
+         for(int i = 0; i < 25; i++)
+            ManageBaskets();
+      g_monitor.CheckGrid(g_cycle.Number(), g_cycle.Name(), g_cycle.Is(CYCLE_PLACING) || g_cycle.Is(CYCLE_ARMED),
+                          g_strategy.max_positions, g_strategy.grid_cycle_pause_seconds, g_strategy.id,
+                          g_cycle.PauseUntil());
+      return;
+     }
 
    if(SinglePositionMode())
      {
@@ -1761,7 +2629,9 @@ double OnTester()
                "reversals_flat=%d | max_overlap_ms=%I64u | recoveries=%d | closing=%d | breaches_seen=%d | breaches_repaired=%d | "
                "chaos=%d (manual_close=%d extra_position=%d duplicate_order=%d restart=%d tick_storm=%d) | "
                "net_profit=%.2f | profit_factor=%.2f | win_rate=%.1f | max_drawdown_pct=%.2f | "
-               "market_start=%.2f | market_end=%.2f | market_change_pct=%.2f | market_range=%.2f | checks=%d",
+               "market_start=%.2f | market_end=%.2f | market_change_pct=%.2f | market_range=%.2f | checks=%d | "
+               "cycle=%d | cycle_state=%s | cycles_closed=%d | cycle_recoveries=%d | ladder_max_orders=%d | "
+               "ladder_requests=%d | ladder_closed_profit=%.2f | resting_orders=%d | open_positions=%d",
                g_monitor.violations, g_monitor.max_positions, trades, g_state.Reversals(), g_state.ReversalsFlat(),
                g_monitor.max_overlap_ms,
                g_state.Entries(STATE_RECOVERY), g_state.Entries(STATE_CLOSING),
@@ -1771,7 +2641,10 @@ double OnTester()
                TesterStatistics(STAT_PROFIT), TesterStatistics(STAT_PROFIT_FACTOR), win_rate,
                TesterStatistics(STAT_EQUITYDD_PERCENT),
                g_monitor.first_bid, g_monitor.last_bid, change_pct, g_monitor.high_bid - g_monitor.low_bid,
-               g_monitor.checks);
+               g_monitor.checks,
+               g_cycle.Number(), g_cycle.Name(), g_cycle.CyclesClosed(), g_cycle.Entries(CYCLE_RECOVERY),
+               g_ladder_max_orders, g_ladder_requests, g_ladder_closed_profit, g_grid.OurOrders(),
+               g_grid.TotalPositions());
    return -(double)g_monitor.violations;
   }
 
@@ -1801,6 +2674,20 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
                         const MqlTradeResult &result)
   {
+   //--- The grid's basket close sends its closes and cancels asynchronously,
+   //--- so a rejection is not seen at the call: it arrives here. A cancel
+   //--- request carries no symbol (CTrade::OrderDelete sets only the order
+   //--- and the magic), so an empty symbol counts as ours.
+   if(trans.type == TRADE_TRANSACTION_REQUEST)
+     {
+      bool close_or_cancel = (request.action == TRADE_ACTION_DEAL && request.position != 0 && request.symbol == _Symbol) ||
+                             (request.action == TRADE_ACTION_REMOVE && (request.symbol == "" || request.symbol == _Symbol));
+      if(request.magic == (ulong)InpMagicNumber && close_or_cancel &&
+         g_strategy.category == CATEGORY_GRID && g_cycle.Is(CYCLE_CLOSING))
+         NoteCloseRejection(request, result);
+      return;
+     }
+
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD || trans.symbol != _Symbol)
       return;
    if(!HistoryDealSelect(trans.deal))
@@ -1820,6 +2707,28 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                   side, HistoryDealGetDouble(trans.deal, DEAL_VOLUME),
                   DoubleToString(HistoryDealGetDouble(trans.deal, DEAL_PRICE), digits),
                   HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID));
+
+      //--- A rung filled: it joins the cycle's filled set (never placed
+      //--- again this cycle, D6), and the basket changed, so its target is
+      //--- checked now rather than on the next timer — a fast move can reach
+      //--- it between two timer events.
+      if(g_strategy.category == CATEGORY_GRID)
+        {
+         string comment = HistoryDealGetString(trans.deal, DEAL_COMMENT);
+         if(IsTester())
+            g_monitor.NoteGridFill(CycleFromComment(comment), type, comment,
+                                   (ulong)HistoryDealGetInteger(trans.deal, DEAL_ORDER));
+         g_grid.NoteFillDeal(g_strategy.id, trans.deal);
+         //--- A rung that filled while the basket is being closed (its cancel
+         //--- arrived too late) is closed at once, not on the next 2 s pass.
+         if(g_cycle.Is(CYCLE_CLOSING) && InpAllowTrading)
+           {
+            g_grid.NoteOpenPositions();
+            g_grid.ClosePosition((ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID), g_cycle_close_reason, true);
+           }
+         ManageBaskets();
+         return;
+        }
 
       if(!SinglePositionMode())
          return;
@@ -1847,6 +2756,13 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                   HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID),
                   DoubleToString(HistoryDealGetDouble(trans.deal, DEAL_PRICE), digits),
                   DealReasonText(reason), HistoryDealGetDouble(trans.deal, DEAL_PROFIT));
+
+      //--- A position of the basket closed: the close advances at once.
+      if(g_strategy.category == CATEGORY_GRID)
+        {
+         ManageBaskets();
+         return;
+        }
 
       if(!SinglePositionMode())
          return;

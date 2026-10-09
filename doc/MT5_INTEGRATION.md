@@ -84,6 +84,18 @@ considered stale after **90 seconds** without a report.
     "symbol": "XAUUSD"
   },
   "tick": { "bid": "2318.40", "ask": "2318.45", "spread_points": 5 },
+  "execution": {
+    "state": "ARMED",
+    "reason": "ladder complete — 58 resting, 2 filled, 0 skipped, capacity 60",
+    "reversal_level": "0.00000",
+    "daily_profit": "1.10",
+    "risk_halt": "",
+    "cycle": 3,
+    "resting_orders": 58,
+    "filled_orders": 2,
+    "basket_profit": "-0.84",
+    "pause_seconds_left": 0
+  },
   "account": {
     "currency": "USD",
     "balance": "10000.00",
@@ -110,15 +122,40 @@ considered stale after **90 seconds** without a report.
   "orders": [
     {
       "ticket": "2001",
-      "order_type": "buy_limit",
+      "order_type": "buy_stop",
       "grid_level": 2,
       "volume": "0.01",
-      "price": "2295.20",
+      "price": "2322.45",
       "placed_at": "2026-09-06T08:00:00Z"
     }
   ]
 }
 ```
+
+### The execution block
+
+What the EA is doing, for the Robot state card. `state` and `reason` come
+from the EA's state machine: `INITIALIZING`, `WAITING`, `BUY_ACTIVE`,
+`SELL_ACTIVE`, `REVERSING`, `CLOSING`, `RECOVERY` for a trailing or reversal
+strategy (`mt5/Include/GoldGrid/State.mqh`); `INITIALIZING`, `PLACING`,
+`ARMED`, `CLOSING`, `COOLDOWN`, `RECOVERY` for a grid
+(`mt5/Include/GoldGrid/Cycle.mqh`). The rest of the block:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `reversal_level` | string | Reversal only: the price the open position's opposite stop rests at. `"0.00000"` means none and is stored as null |
+| `daily_profit` | string | Today's realised + floating P/L, every category |
+| `risk_halt` | string | Why trading is halted (emergency stop, daily loss), `""` for none |
+| `cycle` | integer or null | Grid: the cycle number. Null for the other categories |
+| `resting_orders` | integer or null | Grid: ladder rungs resting |
+| `filled_orders` | integer or null | Grid: rungs that filled and are open |
+| `basket_profit` | string or null | Grid: the combined floating P/L of every open position, net of swap and commission — the figure compared with the basket take profit |
+| `pause_seconds_left` | integer or null | Grid: seconds of pause left; 0 outside `COOLDOWN` |
+
+The whole block may be absent (an EA older than the state machine), in which
+case the stored state is cleared rather than left showing an old one. A grid
+order's `grid_level` is its rung, counted outward from the anchor; `0` for an
+order that is not a ladder rung.
 
 ### Rules that matter
 
@@ -165,18 +202,20 @@ The EA polls its strategy to learn what it should be doing. Act on
   the user, because the interface tells them positions are *not* closed by
   stopping.
 
-Configuration is immutable while `running` — the platform returns `409` on an
-attempt to change it — so the EA can safely cache it until `updated_at` changes.
+Configuration may be edited while `running`; only the category is locked. The
+EA caches it and re-fetches as soon as the `config_version` in a report response
+differs from the one it holds.
 
 ```json
 {
   "strategy": {
     "id": 1, "name": "XAUUSD grid", "symbol": "XAUUSD",
     "status": "running", "category": "grid", "direction": "both",
-    "grid": { "spacing_points": 150, "levels": 5, "initial_lot": "0.01",
-              "lot_mode": "fixed", "lot_multiplier": null },
+    "grid": { "spacing_points": 200, "buy_stop_orders": 30, "sell_stop_orders": 30,
+              "cycle_pause_seconds": 10, "initial_lot": "0.01" },
     "trailing": { "stop_points": null, "activation_points": null, "step_points": null },
-    "basket": { "take_profit": null, "stop_loss": null },
+    "entry": { "distance_points": null },
+    "basket": { "take_profit": "2.00", "stop_loss": null },
     "risk": { "max_positions": 10, "max_exposure_lots": "0.50",
               "max_drawdown_percent": "20.00", "min_margin_level_percent": "200.00",
               "max_spread_points": 50, "maximum_theoretical_lots": "0.05" },
@@ -185,23 +224,29 @@ attempt to change it — so the EA can safely cache it until `updated_at` change
 }
 ```
 
-`direction`: `both` | `buy` | `sell`. With `both`, the EA runs a buy side and a
-sell side independently and continuously — each opens, exits and re-opens on its
-own, without intervention between trades. It requires a **hedging** broker
-account; on a netting account the EA refuses the opposing direction, because a
-buy and a sell on one symbol would net against each other. Position, exposure,
-drawdown and margin ceilings apply across both sides together.
-`lot_mode`: `fixed` (every level the same size) | `multiplier` (level *n* is
-`initial_lot × multiplier^(n-1)`).
+`direction`: `both` | `buy` | `sell`. Read by the trailing category only; a
+grid's two order counts decide its sides, and a reversal always alternates. A
+grid and a reversal both require a **hedging** broker account, because a buy
+and a sell on one symbol would net against each other on a netting account.
+Position, exposure, drawdown and margin ceilings apply across everything the
+strategy holds.
 
-`category`: `grid` | `trailing`. It decides how positions are **opened**, not
-how they exit:
+`category`: `grid` | `trailing` | `reversal`. It decides how positions are
+**opened**, not how they exit:
 
-* `grid` — adds levels as price moves against the basket. `grid.spacing_points`
-  and `grid.levels` are always present.
-* `trailing` — holds **one position per direction** and manages it with its
-  stop. `grid.spacing_points` and `grid.levels` are `null`, and
-  `trailing.stop_points` is guaranteed non-null.
+* `grid` — rests a ladder of stop orders: `grid.buy_stop_orders` Buy Stops
+  above the market and `grid.sell_stop_orders` Sell Stops below it, each
+  `grid.spacing_points` further out than the last, every one of
+  `grid.initial_lot`. Whatever fills is closed together when the combined
+  floating profit reaches `basket.take_profit` (always present for a grid);
+  the remaining orders are cancelled and the ladder is placed again
+  `grid.cycle_pause_seconds` later. The ladder never exceeds
+  `risk.max_positions`. `trailing.*` is always `null` for a grid.
+* `trailing` — holds **one position** and manages it with its stop. The grid
+  keys are `null`, and `trailing.stop_points` is guaranteed non-null.
+* `reversal` — holds one position with no stop loss; a stop order for the
+  opposite side trails it at `trailing.stop_points`, and `entry.distance_points`
+  is the flat bracket's distance.
 
 `stop_loss` on a reported position is the live stop level the position is
 carrying. MT5 reports "no stop attached" as `0`, and the platform stores that
@@ -210,7 +255,8 @@ as `null` rather than as a price.
 ### The trailing block
 
 Present on every strategy. A `stop_points` of `null` means the EA trails
-nothing, which is valid for a grid and impossible for a trailing strategy.
+nothing, which is always the case for a grid and impossible for a trailing
+strategy.
 
 | Key | Meaning |
 | --- | --- |
@@ -232,9 +278,8 @@ invariant the EA will not break, and the stop level itself is what records the
 best price seen, so restarting the terminal cannot reset a trail that has
 already ratcheted.
 
-Trailing applies **per position**, not per basket, because an MT5 stop belongs
-to a position. On a grid, each level is trailed on its own gain, so a level
-still under water is simply never activated.
+Trailing applies **per position**, because an MT5 stop belongs to a position.
+A grid position carries none: its exit is the basket target.
 
 ---
 

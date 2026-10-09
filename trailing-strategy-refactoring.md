@@ -11,6 +11,7 @@
 | 7 | Logging pass + test plan (Strategy Tester scenarios, demo run) | ✅ Done (2026-09-29): 5/5 scenarios pass, 21/21 months 0 violations, real-tick check done; pending: demo run (user) |
 | 8 | Real trailing opposite stop, no stop loss (replaces Option A) | ✅ Done (2026-09-30): 5/5 scenarios pass, 0 violations |
 | 9 | Market guard (flat before the break, wait after the real reopen, spread limit) + distance choice on real ticks | ✅ Done (2026-09-30): bad week −$3,242 → −$678 at $3; $15 distance +$287 over 9 real-tick weeks, 7 of 9 up |
+| 10 | Broker-side exit: the reversal position's stop loss at the same price as its opposite stop, so the close no longer waits for the EA | 🟡 Code done (2026-09-30): compiles 0/0; backtests not yet re-run, not deployed |
 
 ## Phase 1 — Root-cause analysis (done)
 
@@ -444,6 +445,25 @@ The user asked for minimal loss and maximum profit, within the same requirements
 - Weeks A: 2025.08.18, 2025.10.20, 2026.01.19, 2026.06.15, 2026.09.14. Weeks B: 2025.07.07, 2025.09.22, 2025.12.08, 2026.03.09.
 - **Recommendation: 1500 points ($15).** It wins most weeks and has the smallest bad weeks (worst −$115). Short distances lose every week: gold's normal noise and spread are too big for a $3–7 trail.
 - The edge is small (about $30 a week per 0.01 lot) and nine weeks is not proof. Run it on demo before any real money.
+
+## Phase 10: broker-side exit (code done, 2026-09-30)
+
+**Report.** "Sometimes, when a buy trade reaches its sell stop/trailing stop, the trade does not close immediately. The system detects the issue later, after the price has moved further."
+
+**Root cause.** Since Phase 8 a reversal position had no stop loss. The broker filled the opposite stop order, but closing the old position was the EA's job, done only when it saw the fill. Everything that delays the EA delayed the close:
+- The EA's platform calls (`WebRequest`) are synchronous and block its thread. On 2026-09-30 15:26, with the platform answering HTTP 1003, a `BUY_ACTIVE -> REVERSING` took 13 s to complete, and trade events were logged up to 48 s late.
+- With the terminal offline (Docker stopped, 04:52–14:48), both bracket orders filled and nothing was closed for ten hours (−$20.96).
+- Hedged, the pair's loss is frozen, but the old position is then closed far beyond its level, and the new position had no exit of its own until the old one was gone.
+
+**Fix.** The exit is one price, held by the broker twice: the position's stop loss (closes it) and the opposite stop order (opens the reversal). A buy's stop loss and a sell stop both trigger on the bid (a sell's stop loss and a buy stop on the ask), so both happen on the same tick, without the EA.
+- `Grid.mqh`: `TrailReversalExit()` replaces `TrailOppositeStop()` + `RemoveStopLoss()`. It ratchets from the tighter of the current stop loss and the resting order, sets the stop loss first, then the order. `reverse = false` withdraws the order and keeps the stop loss only.
+- Every stop order (bracket and reversal) carries the stop loss its position opens with (`EntryStopLoss()`: distance + spread behind the entry), so a new position is protected from its first tick. `PlacePendingStop()` / `ModifyPendingStop()` take a stop loss. A bracket order without one is stale.
+- `GoldGrid.mq5`: `StepState()` recognises the new reversal (old position closed at its stop loss, new one open) and closes it if reversing is blocked. After a close, nothing is cancelled for 3 s (`EXIT_SETTLE_MS`) so the opposite fill can arrive. While reversing is not allowed (strategy stopped, halt, platform stale) only the stop loss trails. The `REVERSING` path stays as the fallback.
+- `Tester.mqh`: a reversal position must carry a stop loss (it used to be a violation); position stop losses are ratchet-checked under their own key (a position shares its ticket with its order).
+
+**Note.** This puts a stop loss back on the position, which Phase 8 removed. The opposite stop order is still there, so the Phase 8 behaviour is unchanged. The difference is that the close no longer waits for the EA.
+
+**Pending.** `bin/mt5_backtest --pause-app` (all 5 scenarios) was not run: it stops the Docker app, and that needs the user's go-ahead. The code is not deployed to the container.
 
 ## Independent code review (2026-09-29)
 
