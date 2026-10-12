@@ -2,6 +2,15 @@ ENV["RAILS_ENV"] ||= "test"
 require_relative "../config/environment"
 require "rails/test_help"
 
+# CI has no master key, so credentials are empty there. The push tests read web_push from
+# credentials; give them a fixed test-only VAPID pair when none is present. Tests that need
+# "no keys" stub it to nil themselves. This pair signs nothing real.
+TEST_WEB_PUSH = {
+  public_key: "BCbIPAfi54xTL7Y8WNkegR_72aNymlekHDbgIvP7UqinZmTgwqAdb8KjUF_lrkRxAOvfW8vhHEXFM4R92ygaerY",
+  private_key: "hJqtJ1W10AID-tqnPNL5m-f7oMS3glBEw3dZQzjRDEU"
+}.freeze
+Rails.application.credentials.define_singleton_method(:web_push) { TEST_WEB_PUSH } unless Rails.application.credentials.web_push
+
 # Shared test support (test/support/*.rb). Required rather than autoloaded:
 # these are test helpers, not application code, and must never be reachable
 # from app/.
