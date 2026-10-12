@@ -425,6 +425,26 @@ for Rails 8; pick one explicitly when creating the service.
 | `DATABASE_URL` | set by `postgres:link` |
 | `CACHE_DATABASE_URL`, `QUEUE_DATABASE_URL`, `CABLE_DATABASE_URL` | §8.1 |
 | `SMTP_PORT` (587), `SMTP_USER_NAME`, `SMTP_PASSWORD`, `MAILER_FROM` | SMTP provider to be chosen |
+
+**Email is deferred until after the first deploy (decided 2026-10-12). Use these placeholders for now:**
+
+| Variable | Placeholder | Why |
+|---|---|---|
+| `SMTP_ADDRESS` | `smtp.invalid` | Required to boot. `.invalid` never resolves, so nothing is sent by mistake. |
+| `SMTP_PORT` | `587` | Default, fine as is. |
+| `SMTP_USER_NAME` / `SMTP_PASSWORD` | left unset | No provider yet. |
+| `MAILER_FROM` | `no-reply@flextools.io` | Not yet verified with a provider, so mail will not be delivered. |
+| `APP_HOST` | `trading.flextools.io` | Used in email links. |
+
+What the placeholders mean in practice, verified in the code:
+- All mail is sent with `deliver_later`, so it runs as a background job. Signup
+  still succeeds, but the verification email never arrives, so new users can't
+  verify their accounts.
+- Alert emails fail as separate background jobs. The monitoring job itself
+  isn't affected, but failed mail jobs will pile up and should be checked.
+- The owner's account should be created from the Rails console and marked
+  verified (one-off data step, to be run with you).
+- Don't invite other users until a real provider is set up and tested.
 | `SOLID_QUEUE_IN_PUMA` | `1` (mandatory — recurring MT5 jobs) |
 | `PORT` | `3000` (Puma) — verify what Dokku sets for Dockerfile apps |
 | `RAILS_MAX_THREADS`, `WEB_CONCURRENCY`, `JOB_CONCURRENCY`, `RAILS_LOG_LEVEL` | optional tuning |
@@ -458,8 +478,16 @@ Must **not** be set in production: `TAILWINDCSS_IN_PUMA`, `MT5_VNC`,
 
 ## 9. Domain, HTTPS, and Networking
 
-* Pick a new subdomain (not yet decided — do not invent one). DNS A record →
-  `158.220.108.180`. Must not conflict with FlexTools domains.
+* **Chosen subdomain: `trading.flextools.io`** (decided 2026-10-12). DNS A record →
+  `158.220.108.180`.
+* **DNS check (2026-10-12):** `trading.flextools.io` has no A or CNAME record, so
+  the name is free. `flextools.io` and `www.flextools.io` resolve to Cloudflare
+  addresses (`172.67.190.109`, `104.21.19.225`), so the zone is probably behind
+  Cloudflare. **Create the new record as DNS only (grey cloud), not proxied.**
+  Let's Encrypt's HTTP check must reach the server directly. Confirm the proxy
+  setting of the existing FlexTools records in Cloudflare before copying it.
+  `backend-apis.flextools.io` and `super-admin-management.flextools.io` returned no
+  public record from this lookup, so their setup is unknown.
 * Port mapping: **only** `http:80:3000` and `https:443:3000`. Explicitly set
   with `dokku ports:set` so the `EXPOSE 5901` in the image is never mapped.
 * HTTPS via `dokku letsencrypt:enable <new-app>` only.
@@ -497,18 +525,36 @@ instance dirs are `0700`.
 ## 11. Trading-specific deployment risks (new)
 
 1. **A redeploy kills every running terminal.** Terminals are child processes
-   of the container. Rule: before any deploy or restart, every running
-   strategy must be flat (no open positions, no resting orders) **and** have
-   reported since being stopped. (This rule already exists for local
-   backtests; the same applies to production.)
+   of the container. **Decided 2026-10-12: deploys may run with open trades**
+   (option 2). Broker-side stop-loss and take-profit keep protecting open
+   positions, but nothing reverses or adjusts them until the terminal is back.
+   Expected unmanaged window: about 3–4 minutes (measured in the recreate
+   tests). Rules that follow from this:
+   - Pre-deploy gate in the workflow: refuse only if the node or a terminal is
+     in an unknown state (for example, a terminal stuck in `connecting` or
+     `failed` before the deploy starts). Open positions do not block.
+   - Post-deploy gate: every instance that was `running` before the deploy must
+     reach `running` with a fresh heartbeat within 10 minutes. If one does not,
+     the deploy is marked failed.
+   - Strategies are never restarted by the deploy. Restart manually from the UI
+     after the post-deploy gate passes.
+   - Before the first live deploy, confirm each strategy's stop-loss/take-profit
+     is set broker-side. Without it, an open position has no protection during
+     the gap.
 2. **Zero-downtime overlap.** Dokku starts the new container before retiring
    the old one. Both would see the same `/opt/goldgrid/instances` volume; the
    new container's reconciler can start a second terminal for the same broker
    account while the old one is still alive → **two EAs on one account**.
-   Options to evaluate: disable zero-downtime for this app
-   (`checks:disable` / retire immediately) and accept a short downtime, or
-   drain terminals first (`mt5:drain`). Must be decided and tested before the
-   first real deploy.
+   **Decided 2026-10-12: option 1, no overlap.** Turn off zero-downtime for
+   this app so the old container fully stops before the new one starts.
+   Terminals return in about 3–4 minutes, the same gap accepted in §11.1.
+   Set via `checks:disable` (or equivalent retire-immediately setting), to be
+   verified on the server before the first deploy.
+   Test before the first real deploy: with a demo-account terminal running,
+   deploy once and confirm only one `terminal64.exe` process exists during the
+   swap, and that the instance returns to `running`.
+   Rejected for now: draining terminals first (more code, more failure points)
+   and a database lock (most code, easiest to get wrong).
 3. **Zombie processes.** Without an init as PID 1 dead terminals become
    zombies that look alive. Locally `init: true` fixes this; on Dokku verify
    that `--init` is injected (`scheduler-docker-local` init-process, or
@@ -570,10 +616,13 @@ instance dirs are `0700`.
 - [x] Confirm active Dokku proxy: nginx
 - [x] Measure FlexTools' RAM/CPU: ~1.04 GiB total, near-zero CPU, no memory limits set
 - [ ] Set a memory limit on the new app (`dokku resource:limit --memory …`) so it cannot starve FlexTools
-- [ ] Decide subdomain; create DNS A record
-- [ ] Decide SMTP provider (`SMTP_*`, `MAILER_FROM`)
+- [x] Decide subdomain: `trading.flextools.io`
+- [x] Create DNS A record `trading.flextools.io` → `158.220.108.180`, DNS only (not proxied). Verified 2026-10-12 via 1.1.1.1, 8.8.8.8 and 9.9.9.9; the local resolver still caches an empty answer.
+- [~] SMTP provider deferred until after first deploy; placeholders in §8.2 (`SMTP_ADDRESS=smtp.invalid`). Before inviting other users: pick a provider, verify the domain, test, and check failed mail jobs.
 - [ ] Decide `PRODUCT_BASE_URL` (loopback recommended)
-- [ ] Decide redeploy strategy for live terminals (§11.2)
+- [x] Decide redeploy strategy for live terminals: deploys allowed with open trades, post-deploy gate (§11.1)
+- [x] Decide zero-downtime overlap handling: option 1, no overlap (§11.2)
+- [ ] Verify on the server that zero-downtime is off for the app, and test one demo-terminal deploy (§11.2)
 - [ ] Approve and write production MT5 Dockerfile (§5) + `app.json` predeploy; build-test locally
 - [ ] Create Dokku app, set dockerfile-path, ports, memory limit, init
 - [ ] Create `goldgrid-db` Postgres service, link, set the 3 extra DB URLs
