@@ -332,7 +332,27 @@ Keep the local `docker/mt5-worker/Dockerfile` unchanged so the dev stack keeps w
 Migrations: run via a Dokku `app.json` `scripts.dokku.predeploy`
 (`bin/rails db:prepare`) rather than in the entrypoint.
 
-**Do not edit any file until this is approved.**
+**Approved and built 2026-10-12.** File: `docker/mt5-worker/Dockerfile.production`.
+Test results (local, x86_64, throwaway Postgres with all 4 databases):
+
+* Build succeeds (about 15 min first time, Wine layers cached after). Image 1.05 GB.
+* Runs as `goldgrid` (UID/GID 1000); `wine-11.0`; `RAILS_ENV=production`;
+  only port 3000 exposed; no `master.key`, `.git`, `.claude`, `.idea`, `.DS_Store`
+  in the image; no development or test gems.
+* `bin/rails db:prepare` works against the 4 database URLs.
+* Puma starts and `/up` returns 200. Solid Queue supervisor, dispatcher,
+  worker, and scheduler start inside Puma.
+* Xvfb displays `:100` to `:109` start; no VNC process and no listening 5901.
+* `assume_ssl = true` makes Rails treat every request as HTTPS, so Rails does
+  **not** redirect plain HTTP. `/` returns 200 over HTTP inside the container.
+  The HTTP → HTTPS redirect has to be handled by Dokku's nginx on the server
+  (verify when setting up the app), not by Rails. `/up` works over HTTP without
+  any change.
+* Not yet tested: the terminals themselves in this image (needs the MT5
+  template, which is prepared on the server or in the dev stack).
+
+Changes made while testing: `.dockerignore` now excludes `.claude`, `.idea`,
+and `.DS_Store`. (The temporary `/up` redirect exclusion was reverted: not needed.)
 
 ---
 
@@ -623,7 +643,8 @@ instance dirs are `0700`.
 - [x] Decide redeploy strategy for live terminals: deploys allowed with open trades, post-deploy gate (§11.1)
 - [x] Decide zero-downtime overlap handling: option 1, no overlap (§11.2)
 - [ ] Verify on the server that zero-downtime is off for the app, and test one demo-terminal deploy (§11.2)
-- [ ] Approve and write production MT5 Dockerfile (§5) + `app.json` predeploy; build-test locally
+- [x] Approve and write production MT5 Dockerfile (§5); build-tested locally, boot-tested with Postgres
+- [ ] Write `app.json` predeploy (`bin/rails db:prepare`)
 - [ ] Create Dokku app, set dockerfile-path, ports, memory limit, init
 - [ ] Create `goldgrid-db` Postgres service, link, set the 3 extra DB URLs
 - [ ] Set all env vars / secrets with `dokku config:set`
