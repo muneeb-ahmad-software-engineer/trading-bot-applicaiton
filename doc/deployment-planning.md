@@ -674,7 +674,8 @@ instance dirs are `0700`.
 - [x] Set all env vars / secrets with `dokku config:set` (names verified with `config:keys`; RAILS_MASTER_KEY length checked as 33)
 - [x] Create storage directories and `storage:mount` (owned 1000:1000)
 - [ ] First deploy (manual `git push`), `db:prepare`, `/up` check
-- [ ] Let's Encrypt for the new app
+- [x] Let's Encrypt for the new app: `trading.flextools.io` certificate issued 2026-10-12, expires 2027-01-10, auto-renewal scheduled. Default domain `goldgrid.vmi2873256...` removed from the app (it had no DNS record). FlexTools certificates untouched.
+- [x] HTTP → HTTPS redirect in Rails: `assume_ssl = false`, `/up` excluded (tested in container: plain HTTP 301, `/up` 200, proxied HTTPS 200). Not yet verified through Dokku's nginx: check `curl -I http://trading.flextools.io/` returns 301 after the first deploy.
 - [ ] `mt5:register_node`; prepare MT5 template via SSH-tunnelled VNC; back up template
 - [ ] First terminal with `allow_trading: false`
 - [ ] Postgres + template backups, off-server, restore tested
