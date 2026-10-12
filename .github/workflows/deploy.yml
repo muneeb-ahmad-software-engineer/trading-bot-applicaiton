@@ -73,7 +73,7 @@ jobs:
           fi
 
       - name: Push to Dokku (builds the image on the server, runs predeploy db:prepare)
-        run: git push "dokku-goldgrid:$DOKKU_APP" HEAD:master
+        run: git push "dokku-goldgrid:$DOKKU_APP" HEAD:refs/heads/master
 
       - name: Health check
         run: |
