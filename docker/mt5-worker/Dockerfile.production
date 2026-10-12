@@ -1,0 +1,119 @@
+# syntax=docker/dockerfile:1
+# check=error=true
+
+# Production image: the Rails app AND the MetaTrader terminals it starts, in one
+# container. See doc/deployment-planning.md §5.
+#
+# Why not the root Dockerfile: that one is a plain Rails image with no Wine, and
+# Mt5::Runtime::Local needs /usr/bin/wine and /usr/bin/Xvfb in the same container
+# as Rails. So this image keeps the worker's Wine layers and adds the production
+# Rails build from the root Dockerfile.
+#
+# Differences from the development image (docker/mt5-worker/Dockerfile):
+#   - RAILS_ENV=production, bundle without development/test groups, precompiled
+#     assets and bootsnap cache. No source bind mount: the code is in the image.
+#   - No build tools or git in the final image; they live in the build stage.
+#   - Fixed UID/GID 1000 for `goldgrid`, so host storage can be chowned to match.
+#   - EXPOSE 3000 only. Port 5901 (VNC) is not published; VNC starts only when
+#     MT5_VNC=1 is set, and is then reached through an SSH tunnel.
+#   - No jemalloc. The root image preloads it with LD_PRELOAD, and that would
+#     also be inherited by every Wine process, which is untested here.
+
+ARG RUBY_VERSION=3.4.10
+FROM docker.io/library/ruby:${RUBY_VERSION}-slim-bookworm AS base
+
+ENV RAILS_ENV="production" \
+    BUNDLE_DEPLOYMENT="1" \
+    BUNDLE_PATH="/usr/local/bundle" \
+    BUNDLE_WITHOUT="development:test" \
+    MT5_TEMPLATE_DIR="/opt/mt5/drive_c/Program Files/MetaTrader 5" \
+    MT5_TERMINAL_BINARY="/opt/mt5/drive_c/Program Files/MetaTrader 5/terminal64.exe" \
+    MT5_INSTANCES_ROOT="/opt/goldgrid/instances" \
+    MT5_WINE_BINARY="/usr/bin/wine" \
+    MT5_XVFB_BINARY="/usr/bin/Xvfb" \
+    MT5_DISPLAY_BASE="100"
+
+# Wine from WineHQ, not Debian: build 6205 refuses Wine 8.0 (see the dev
+# Dockerfile for the full reasoning). i386 is needed because MetaTrader's
+# installer is 32-bit.
+RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
+    printf 'Binary::apt::APT::Keep-Downloaded-Packages "true";\nAcquire::Retries "5";\n' \
+      > /etc/apt/apt.conf.d/99goldgrid
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    dpkg --add-architecture i386 && \
+    apt-get update -qq && \
+    apt-get install --no-install-recommends -y curl ca-certificates gnupg && \
+    mkdir -pm755 /etc/apt/keyrings && \
+    curl -fsSL --retry 5 --retry-connrefused -o /etc/apt/keyrings/winehq-archive.key \
+      https://dl.winehq.org/wine-builds/winehq.key && \
+    curl -fsSL --retry 5 --retry-connrefused -o /etc/apt/sources.list.d/winehq-bookworm.sources \
+      https://dl.winehq.org/wine-builds/debian/dists/bookworm/winehq-bookworm.sources
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update -qq && \
+    apt-get install --install-recommends -y winehq-stable
+
+# Xvfb and window management for the terminals; x11vnc is installed for template
+# preparation over an SSH tunnel and does nothing unless MT5_VNC=1.
+# libpq5 is the runtime library the pg gem links against.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get install --no-install-recommends -y \
+      xvfb xauth x11vnc openbox xdotool \
+      cabextract winbind procps libpq5
+
+RUN ln -sf /opt/wine-stable/bin/wine /usr/bin/wine && \
+    ln -sf /opt/wine-stable/bin/wineserver /usr/bin/wineserver && \
+    ln -sf /opt/wine-stable/bin/wineboot /usr/bin/wineboot && \
+    /usr/bin/wine --version
+
+# Same UID/GID on every box, so storage:mount directories can be chowned once.
+RUN groupadd --system --gid 1000 goldgrid && \
+    useradd --system --uid 1000 --gid 1000 --create-home --shell /bin/bash goldgrid
+
+WORKDIR /rails
+
+# Build stage: compilers and gems. Thrown away with the rest of the build.
+FROM base AS build
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get install --no-install-recommends -y build-essential git libpq-dev pkg-config
+
+COPY Gemfile Gemfile.lock ./
+RUN bundle install && \
+    rm -rf ~/.bundle "${BUNDLE_PATH}"/ruby/*/cache "${BUNDLE_PATH}"/ruby/*/bundler/gems/*/.git && \
+    bundle exec bootsnap precompile --gemfile
+
+COPY . .
+
+RUN bundle exec bootsnap precompile app/ lib/
+
+# No real secret here: the placeholder only lets assets compile without
+# RAILS_MASTER_KEY. The real key is supplied at runtime by Dokku config.
+RUN SECRET_KEY_BASE_DUMMY=1 ./bin/rails assets:precompile
+
+# Final stage: runtime files only.
+FROM base
+
+COPY --from=build "${BUNDLE_PATH}" "${BUNDLE_PATH}"
+COPY --from=build /rails /rails
+
+# Writable runtime directories. The terminal directories are mount points for
+# Dokku storage; their host side must be owned by UID 1000 (doc §10).
+RUN mkdir -p /opt/goldgrid/instances /opt/mt5 && \
+    chown -R goldgrid:goldgrid /opt/goldgrid /opt/mt5 /rails/db /rails/log /rails/storage /rails/tmp
+
+COPY docker/mt5-worker/entrypoint.sh /usr/local/bin/entrypoint
+RUN chmod +x /usr/local/bin/entrypoint
+
+USER goldgrid
+EXPOSE 3000
+
+# Migrations are not run here. Dokku runs them as the predeploy script, so a
+# failed migration stops the deploy before the new container starts.
+ENTRYPOINT ["/usr/local/bin/entrypoint"]
+CMD ["bin/rails", "server", "-b", "0.0.0.0", "-p", "3000"]

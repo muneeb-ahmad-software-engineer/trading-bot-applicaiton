@@ -380,11 +380,25 @@ module Mt5
         pid = instance.pid
         return false if pid.blank?
         return false unless process_exists?(pid)
+        return false unless owned_by_instance?(pid, instance)
 
         recorded = instance.process_token
         return true if recorded.blank?
 
         File.exist?(instance.token_file) && File.read(instance.token_file).strip == recorded
+      rescue SystemCallError
+        false
+      end
+
+      # A recorded pid is only ours if its command line names this instance.
+      # Without this, a container recreate (which restarts PIDs from scratch)
+      # could hand the old pid to some unrelated process, which would then look
+      # like a live terminal and never be restarted. Off Linux there is no
+      # /proc to ask, so the token check is all there is.
+      def owned_by_instance?(pid, instance)
+        return true unless File.directory?("/proc")
+
+        File.binread("/proc/#{pid}/cmdline").tr("\0", " ").downcase.include?(instance.uuid.to_s.downcase)
       rescue SystemCallError
         false
       end

@@ -28,6 +28,18 @@ namespace :mt5 do
     end
   end
 
+  # Run before a deploy. Open positions do NOT block a deploy (doc §11.1): the
+  # broker-side stops protect them. Only a terminal whose outcome is unknown
+  # blocks it, because a deploy would interrupt it mid-transition.
+  desc "Exit non-zero if a terminal is in a state a deploy must not interrupt"
+  task deploy_gate: :environment do
+    unsettled = Mt5Instance.not_terminated.where(state: %w[starting connecting stopping failed])
+    unsettled.find_each { |instance| puts "BLOCKED #{instance.uuid} #{instance.state}" }
+    abort "deploy gate: #{unsettled.count} terminal(s) in an unsettled state" if unsettled.exists?
+
+    puts "deploy gate: ok (#{Mt5Instance.not_terminated.count} terminal(s) not terminated)"
+  end
+
   desc "Reconcile every terminal now, instead of waiting for the schedule"
   task reconcile: :environment do
     puts Mt5::Monitor.call.payload.inspect

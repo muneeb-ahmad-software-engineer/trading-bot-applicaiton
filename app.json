@@ -1,0 +1,9 @@
+{
+  "name": "goldgrid",
+  "description": "GoldGrid trading app: Rails, Solid Queue, and MT5 terminals in one container",
+  "scripts": {
+    "dokku": {
+      "predeploy": "bin/rails db:prepare"
+    }
+  }
+}

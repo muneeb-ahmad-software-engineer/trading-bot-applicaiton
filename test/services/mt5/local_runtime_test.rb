@@ -269,6 +269,50 @@ class LocalRuntimeTest < ActiveSupport::TestCase
     end
   end
 
+  # A container recreate starts PIDs from scratch, so a pid recorded before it
+  # can now belong to any other process — here, a plain `sleep` that never
+  # touched this instance. That pid must not be taken for the terminal, or the
+  # reconciler waits on a process that does not exist and never restarts it.
+  test "a recorded pid that now belongs to another process is not this terminal" do
+    # Ownership is read from /proc, which only Linux has. Without it the runtime
+    # cannot tell processes apart, so this check is meaningless on macOS.
+    skip "needs /proc (Linux)" unless File.directory?("/proc")
+
+    with_local_runtime do
+      instance = provision!(@user)
+      stranger = Process.spawn("sleep", "60")
+      begin
+        instance.update_columns(pid: stranger, process_token: nil)
+        runtime = Mt5::Runtime::Local.new(instance.worker_node)
+
+        with_discovered_pids([]) { assert_not runtime.alive?(instance) }
+      ensure
+        Process.kill("KILL", stranger) rescue nil
+        Process.wait(stranger) rescue nil
+      end
+    end
+  end
+
+  test "a recorded pid whose command line names this instance is still the terminal" do
+    with_local_runtime do
+      instance = provision!(@user)
+      # argv0 puts the uuid on the command line the way start.exe's does.
+      ours = Process.spawn([ "sleep", "sleep-#{instance.uuid}" ], "60")
+      begin
+        instance.update_columns(pid: ours, process_token: nil)
+        runtime = Mt5::Runtime::Local.new(instance.worker_node)
+
+        with_discovered_pids([]) do
+          assert runtime.alive?(instance)
+          assert_equal ours, runtime.current_pid(instance)
+        end
+      ensure
+        Process.kill("KILL", ours) rescue nil
+        Process.wait(ours) rescue nil
+      end
+    end
+  end
+
   test "start does not spawn a second terminal into a tree one is already running from" do
     with_local_runtime do
       instance = provision!(@user)

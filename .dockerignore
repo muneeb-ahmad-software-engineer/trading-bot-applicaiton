@@ -49,3 +49,8 @@
 # Ignore Docker-related files
 /.dockerignore
 /Dockerfile*
+
+# Local editor and tool state, never needed in an image.
+/.claude
+/.idea
+**/.DS_Store
