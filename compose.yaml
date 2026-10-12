@@ -19,7 +19,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U goldgrid"]
+      test: ["CMD-SHELL", "pg_isready -U goldgrid -d gold_grid_development"]
       interval: 5s
       retries: 10
 
@@ -27,6 +27,9 @@ services:
     build:
       context: .
       dockerfile: docker/mt5-worker/Dockerfile
+    # Brings the container back after an unexpected exit or a Docker Desktop
+    # restart. Not after `docker compose stop`, so a deliberate stop stays stopped.
+    restart: unless-stopped
     # A real init as PID 1, so terminals whose parent has exited are reaped
     # instead of lingering as zombies. Puma, left as PID 1, never reaps them.
     init: true
