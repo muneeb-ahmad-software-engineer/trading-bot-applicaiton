@@ -644,7 +644,8 @@ instance dirs are `0700`.
 - [x] Decide zero-downtime overlap handling: option 1, no overlap (§11.2)
 - [ ] Verify on the server that zero-downtime is off for the app, and test one demo-terminal deploy (§11.2)
 - [x] Approve and write production MT5 Dockerfile (§5); build-tested locally, boot-tested with Postgres
-- [ ] Write `app.json` predeploy (`bin/rails db:prepare`)
+- [x] Write `app.json` predeploy (`bin/rails db:prepare`); tested twice on a fresh database, both exit 0
+  - Dokku runs predeploy before the new container starts, and the old version is still running then (§11.2 turns off overlap, not this step). Every migration must therefore work with the previous version of the code still running. Drop or rename columns in two deploys, not one.
 - [ ] Create Dokku app, set dockerfile-path, ports, memory limit, init
 - [ ] Create `goldgrid-db` Postgres service, link, set the 3 extra DB URLs
 - [ ] Set all env vars / secrets with `dokku config:set`
