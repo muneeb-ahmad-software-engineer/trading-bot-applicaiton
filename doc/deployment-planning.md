@@ -63,6 +63,14 @@ I already host my FlexTools SaaS website on this server. The new trading applica
   the default).
 * Minor: `builder-railpack` is 0.36.7 while core is 0.37.2 — not used by this
   plan (we use the Dockerfile builder), but noted.
+* **Re-checked 2026-10-12 (read-only commands run by the owner on the server and
+  pasted into the session):** Dokku apps are `flextools` and `frontendflextools` only.
+  `goldgrid` does not exist yet. The `goldgrid` report commands returned
+  "App does not exist" as expected. Nothing has been created on the server.
+* FlexTools restart policy is `on-failure:10`. Our app should use
+  `unless-stopped` (matches the local compose file), set with `dokku ps:set`.
+* Memory used by all containers: 1.4 GiB (was 1.04 GiB for the FlexTools
+  containers alone earlier, so this is roughly the same load).
 * **FlexTools resource use (snapshot, 2026-10-12):**
 
   | Container | CPU | Memory |
@@ -380,7 +388,20 @@ The FlexTools workflows use `DOKKU_DEPLOY_KEY`, `158.220.108.180:52345` and
 `ssh-keyscan`. The FlexTools backend workflow stops/destroys its container
 before pushing — **never copy that pattern.**
 
-New workflow (`.github/workflows/deploy.yml`, to be written after approval):
+**Written 2026-10-12, not yet run or committed:** `.github/workflows/deploy.yml`.
+Trigger: automatically after the `CI` workflow succeeds on `main` (so a merge into
+`main` deploys), plus a manual run that must type `deploy-goldgrid`. This was
+changed on the owner's request on 2026-10-12, from manual-only. It reuses the
+existing `DOKKU_DEPLOY_KEY` secret and pushes only to `goldgrid`. The workflow
+only starts once its file is on `main`. The gate is `mt5:deploy_gate` (`lib/tasks/mt5.rake`,
+tested in `test/tasks/mt5_deploy_gate_test.rb`): it blocks only on terminals in
+`starting`, `connecting`, `stopping`, or `failed`. Open positions do not block.
+Known gaps: host key is pinned with `ssh-keyscan` (trust on first use, same as
+FlexTools); the health check needs the HTTPS domain (step 6) before it can pass;
+the post-deploy "terminals back to running within 10 min" check is not written yet,
+because no terminal runs until the MT5 template exists.
+
+Original plan (kept for reference):
 
 1. Trigger on push to the chosen branch (and/or manual `workflow_dispatch`).
 2. Checkout with full history (`fetch-depth: 0`) — Dokku needs it for git push.
@@ -646,10 +667,12 @@ instance dirs are `0700`.
 - [x] Approve and write production MT5 Dockerfile (§5); build-tested locally, boot-tested with Postgres
 - [x] Write `app.json` predeploy (`bin/rails db:prepare`); tested twice on a fresh database, both exit 0
   - Dokku runs predeploy before the new container starts, and the old version is still running then (§11.2 turns off overlap, not this step). Every migration must therefore work with the previous version of the code still running. Drop or rename columns in two deploys, not one.
-- [ ] Create Dokku app, set dockerfile-path, ports, memory limit, init
-- [ ] Create `goldgrid-db` Postgres service, link, set the 3 extra DB URLs
-- [ ] Set all env vars / secrets with `dokku config:set`
-- [ ] Create storage directories and `storage:mount`
+- [x] Create Dokku app `goldgrid`: memory 4g, restart `unless-stopped`, `--init` on deploy/run, zero-downtime off (verified 2026-10-12, §2)
+- [x] Set dockerfile-path, port mapping (80 → 3000) (2026-10-12; "detected 5000" is Dokku's guess before the first deploy, our explicit mapping wins; recheck after deploy)
+- [x] Create `goldgrid-db` Postgres 16 service and link `DATABASE_URL` (2026-10-12). The password was pasted into the chat: rotate it before go-live.
+- [ ] Set the 3 extra DB URLs (`goldgrid_db_cache`, `_queue`, `_cable`)
+- [x] Set all env vars / secrets with `dokku config:set` (names verified with `config:keys`; RAILS_MASTER_KEY length checked as 33)
+- [x] Create storage directories and `storage:mount` (owned 1000:1000)
 - [ ] First deploy (manual `git push`), `db:prepare`, `/up` check
 - [ ] Let's Encrypt for the new app
 - [ ] `mt5:register_node`; prepare MT5 template via SSH-tunnelled VNC; back up template

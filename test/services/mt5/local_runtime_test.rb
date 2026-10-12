@@ -274,6 +274,10 @@ class LocalRuntimeTest < ActiveSupport::TestCase
   # touched this instance. That pid must not be taken for the terminal, or the
   # reconciler waits on a process that does not exist and never restarts it.
   test "a recorded pid that now belongs to another process is not this terminal" do
+    # Ownership is read from /proc, which only Linux has. Without it the runtime
+    # cannot tell processes apart, so this check is meaningless on macOS.
+    skip "needs /proc (Linux)" unless File.directory?("/proc")
+
     with_local_runtime do
       instance = provision!(@user)
       stranger = Process.spawn("sleep", "60")

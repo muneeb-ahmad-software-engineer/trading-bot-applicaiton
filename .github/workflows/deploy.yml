@@ -1,0 +1,88 @@
+name: Deploy GoldGrid
+
+# Deploys goldgrid to Dokku after CI passes on main, which happens when a branch
+# is merged into main. Also runnable by hand from the Actions tab.
+#
+# A deploy restarts the container, which stops every terminal on the box (doc
+# §11). The pre-deploy gate refuses to run while a terminal is in an unsettled
+# state, and open positions do not block it.
+#
+# Never stops, destroys, or reconfigures any app other than goldgrid. The
+# FlexTools workflow's stop-and-destroy step must not be copied here.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type deploy-goldgrid to confirm"
+        required: true
+
+concurrency:
+  group: deploy-goldgrid
+  cancel-in-progress: false
+
+env:
+  DOKKU_HOST: 158.220.108.180
+  DOKKU_SSH_PORT: "52345"
+  DOKKU_APP: goldgrid
+  HEALTH_URL: https://trading.flextools.io/up
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Only after CI succeeded on main, or when started by hand with the confirmation.
+    if: >-
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'workflow_dispatch' && inputs.confirm == 'deploy-goldgrid')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          # For workflow_run, check out the exact commit CI tested, not whatever main is now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Set up SSH to Dokku
+        env:
+          DEPLOY_KEY: ${{ secrets.DOKKU_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "$DOKKU_SSH_PORT" "$DOKKU_HOST" >> ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host dokku-goldgrid
+            HostName $DOKKU_HOST
+            Port $DOKKU_SSH_PORT
+            User dokku
+            IdentityFile ~/.ssh/id_deploy
+            IdentitiesOnly yes
+          EOF
+
+      - name: Pre-deploy gate (refuse while a terminal is in an unsettled state)
+        run: |
+          # The first deploy has no image yet, so there is nothing to gate.
+          if ssh dokku-goldgrid ps:report "$DOKKU_APP" | grep -q "Deployed:.*true"; then
+            ssh dokku-goldgrid run "$DOKKU_APP" bin/rails mt5:deploy_gate
+          else
+            echo "No deployed image for $DOKKU_APP yet: gate skipped (first deploy)."
+          fi
+
+      - name: Push to Dokku (builds the image on the server, runs predeploy db:prepare)
+        run: git push "dokku-goldgrid:$DOKKU_APP" HEAD:master
+
+      - name: Health check
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl -fsS "$HEALTH_URL" >/dev/null; then
+              echo "healthy after attempt $attempt"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "health check failed: $HEALTH_URL"
+          exit 1
