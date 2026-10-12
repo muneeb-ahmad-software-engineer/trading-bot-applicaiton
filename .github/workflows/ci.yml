@@ -57,6 +57,15 @@ jobs:
     runs-on: ubuntu-latest
 
     # services:
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: --health-cmd "pg_isready -U postgres" --health-interval 10s --health-timeout 5s --health-retries 5
     #  redis:
     #    image: redis
     #    ports:
@@ -78,6 +87,8 @@ jobs:
       - name: Run tests
         env:
           RAILS_ENV: test
+          DATABASE_USERNAME: postgres
+          DATABASE_PASSWORD: postgres
           # REDIS_URL: redis://localhost:6379/0
         run: bin/rails db:test:prepare test test:system
 

@@ -1,0 +1,22 @@
+{
+  "ignored_warnings": [
+    {
+      "warning_type": "Unmaintained Dependency",
+      "warning_code": 122,
+      "fingerprint": "98b26f60d776fd41ee6f088c833725145be9aac2d7c5b33780241c273622db42",
+      "check_name": "EOLRails",
+      "message": "Support for Rails 8.0.5.1 ends on 2026-11-07",
+      "file": "Gemfile.lock",
+      "line": 241,
+      "link": "https://brakemanscanner.org/docs/warning_types/unmaintained_dependency/",
+      "code": null,
+      "render_path": null,
+      "location": null,
+      "user_input": null,
+      "confidence": "Medium",
+      "note": "Temporary. Rails 8.0 security support ends 2026-11-07. Upgrade to Rails 8.1 before that date and delete this entry; the scan will fail again on the new version if it is still EOL."
+    }
+  ],
+  "updated": "2026-10-12 00:00:00 +0000",
+  "brakeman_version": "8.0.6"
+}
