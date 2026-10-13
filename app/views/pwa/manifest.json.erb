@@ -5,6 +5,8 @@
   "name": "<%= product.name %> — <%= product.tagline %>",
   "short_name": "<%= product.name %>",
   "description": "<%= product.description %>",
+  "lang": "en",
+  "dir": "ltr",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
@@ -19,8 +21,19 @@
     { "src": "/icons/icon-maskable-192.png", "type": "image/png", "sizes": "192x192", "purpose": "maskable" },
     { "src": "/icons/icon-maskable-512.png", "type": "image/png", "sizes": "512x512", "purpose": "maskable" },
     { "src": "/icon.svg", "type": "image/svg+xml", "sizes": "any", "purpose": "any" }
+  ],
+  "shortcuts": [
+    {
+      "name": "Dashboard",
+      "short_name": "Dashboard",
+      "url": "/dashboard",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Strategies",
+      "short_name": "Strategies",
+      "url": "/strategies",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
   ]
 }
-
-<%# App shortcuts are added once /dashboard and /strategies exist — a shortcut
-    pointing at a missing route fails installation checks. %>

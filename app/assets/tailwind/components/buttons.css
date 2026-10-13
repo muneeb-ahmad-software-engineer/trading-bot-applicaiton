@@ -79,4 +79,11 @@
   .btn-block {
     @apply w-full sm:w-auto;
   }
+
+  /* Touch screens get the 44px minimum target; a mouse keeps the compact size. */
+  @media (pointer: coarse) {
+    .btn {
+      min-height: 2.75rem;
+    }
+  }
 }

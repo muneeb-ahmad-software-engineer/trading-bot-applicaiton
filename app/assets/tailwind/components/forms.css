@@ -8,8 +8,10 @@
   .input-numeric,
   .select,
   .textarea {
+    /* 16px below md. iOS Safari zooms the whole page when a control with a
+       smaller font-size gains focus, and the zoom does not reset on blur. */
     @apply block w-full rounded-input border border-border bg-surface-sunken
-           px-3 py-2.5 text-sm text-text-primary;
+           px-3 py-2.5 text-base text-text-primary md:text-sm;
     transition-property: border-color, background-color;
     transition-duration: var(--duration-fast);
   }

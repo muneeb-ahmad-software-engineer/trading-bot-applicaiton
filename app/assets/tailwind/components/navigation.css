@@ -36,7 +36,7 @@
 
   /* Icon-only trigger for the mobile menu. */
   .nav-toggle {
-    @apply inline-flex size-10 items-center justify-center rounded-md text-text-secondary md:hidden;
+    @apply inline-flex size-11 items-center justify-center rounded-md text-text-secondary md:hidden;
   }
 
   .nav-toggle:hover {

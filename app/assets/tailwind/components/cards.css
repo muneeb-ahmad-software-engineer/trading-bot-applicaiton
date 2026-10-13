@@ -37,8 +37,10 @@
   }
 
   /* A labelled figure: the standard way to present one number. */
+  /* min-w-0 lets a stat shrink inside its grid track instead of pushing the
+     grid wider than the screen. */
   .stat {
-    @apply flex flex-col gap-1;
+    @apply flex min-w-0 flex-col gap-1;
   }
 
   .stat-label {
