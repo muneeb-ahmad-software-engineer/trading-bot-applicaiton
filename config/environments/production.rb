@@ -32,8 +32,12 @@ Rails.application.configure do
   # Force all access to the app over SSL, use Strict-Transport-Security, and use secure cookies.
   config.force_ssl = true
 
-  # Skip http-to-https redirect for the default health check endpoint.
-  config.ssl_options = { redirect: { exclude: ->(request) { request.path == "/up" } } }
+  # Skip http-to-https redirect for the health check, and for the terminals on this
+  # machine. An MT5 EA calls the platform over plain HTTP at 127.0.0.1, and the
+  # redirect sends it to https://127.0.0.1, which it cannot follow. REMOTE_ADDR is the
+  # socket address, not a header, so a visitor cannot claim to be loopback. Public
+  # traffic reaches the app through the Dokku proxy and never arrives from 127.0.0.1.
+  config.ssl_options = { redirect: { exclude: ->(request) { request.path == "/up" || request.env["REMOTE_ADDR"] == "127.0.0.1" } } }
 
   # Log to STDOUT with the current request id as a default log tag.
   config.log_tags = [ :request_id ]
