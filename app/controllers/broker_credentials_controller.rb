@@ -60,6 +60,17 @@ class BrokerCredentialsController < ApplicationController
     @credential = current_user.broker_credential || current_user.build_broker_credential
   end
 
+  # Replaces the generic guard for this page. The form cannot be held across a
+  # password confirmation, so without saying so the user returns to an empty
+  # form and reasonably believes the save went through.
+  def require_recent_authentication
+    return if recently_authenticated?
+
+    session[:return_to_after_reauthentication] = edit_broker_credential_path
+    redirect_to new_reauthentication_path,
+                alert: "Confirm your password first. Your broker details were not saved, so enter them again after confirming."
+  end
+
   def notice_for_save
     if current_user.strategies.running.any?
       "Broker details saved. Restart your strategy to reconnect the terminal with them."
