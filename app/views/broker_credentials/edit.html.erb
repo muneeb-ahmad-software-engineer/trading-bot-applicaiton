@@ -52,7 +52,7 @@
 
         <div class="field">
           <%= form.label :login, "Account number", class: "label" %>
-          <%= form.text_field :login, class: "input-numeric", required: true, autocomplete: "off",
+          <%= form.text_field :login, class: "input", required: true, autocomplete: "off", spellcheck: false,
                 inputmode: "numeric", "aria-describedby": "broker_login_hint" %>
           <p class="field-hint" id="broker_login_hint">The numeric MT5 login, not your broker portal email.</p>
         </div>
@@ -81,11 +81,16 @@
 
         <div class="flex flex-wrap items-center gap-2 pt-2">
           <%= form.submit @credential.persisted? ? "Save changes" : "Save broker details", class: "btn btn-primary" %>
-          <% if @credential.persisted? %>
-            <%= button_to "Remove broker details", broker_credential_path, method: :delete,
-                  class: "btn btn-ghost text-danger",
-                  form: { data: { turbo_confirm: "Remove your broker details? Your terminal will be shut down and no further orders will be placed." } } %>
-          <% end %>
+        </div>
+      <% end %>
+
+      <%# Outside the save form: a button_to form nested inside another form is dropped by the browser, and the Remove click would silently submit the save. %>
+      <% if @credential.persisted? %>
+        <div class="mt-6 border-t border-border pt-4">
+          <p class="body-sm mb-3">Removing these details shuts down your terminal. No further orders will be placed.</p>
+          <%= button_to "Remove broker details", broker_credential_path, method: :delete,
+                class: "btn btn-outline text-danger",
+                form: { data: { turbo_confirm: "Remove your broker details? Your terminal will be shut down and no further orders will be placed." } } %>
         </div>
       <% end %>
     <% } %>

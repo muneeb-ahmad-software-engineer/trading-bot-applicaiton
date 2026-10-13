@@ -67,6 +67,33 @@ class BrokerCredentialsTest < ActionDispatch::IntegrationTest
     assert_no_match(/broker-trading-password/, response.body)
   end
 
+  test "the page never nests one form inside another" do
+    patch broker_credential_path, params: { broker_credential: DETAILS }
+    get edit_broker_credential_path
+
+    # Browsers drop a nested <form> tag, so a Remove button placed inside the
+    # save form would silently submit the save instead of deleting anything.
+    assert_empty Nokogiri::HTML(response.body).css("form form")
+  end
+
+  test "the Remove button is a delete form that asks for confirmation" do
+    patch broker_credential_path, params: { broker_credential: DETAILS }
+    get edit_broker_credential_path
+
+    remove = Nokogiri::HTML(response.body).at_css("form[action='#{broker_credential_path}'][data-turbo-confirm]")
+    assert_equal "delete", remove.at_css("input[name='_method']")["value"]
+  end
+
+  test "saving without a recent password entry says the details were not kept" do
+    travel Authentication::REAUTHENTICATION_WINDOW + 1.minute
+
+    patch broker_credential_path, params: { broker_credential: DETAILS }
+
+    assert_redirected_to new_reauthentication_path
+    assert_match "enter them again", flash[:alert]
+    assert_equal edit_broker_credential_path, session[:return_to_after_reauthentication]
+  end
+
   test "settings links to the broker account page" do
     get settings_path
 
