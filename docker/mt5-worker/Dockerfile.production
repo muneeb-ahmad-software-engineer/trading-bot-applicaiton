@@ -79,8 +79,11 @@ WORKDIR /rails
 # Build stage: compilers and gems. Thrown away with the rest of the build.
 FROM base AS build
 
+# Refresh the package index here too. The build cache can be empty on a fresh
+# builder, and install then fails with "Unable to locate package".
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update -qq && \
     apt-get install --no-install-recommends -y build-essential git libpq-dev pkg-config
 
 COPY Gemfile Gemfile.lock ./
