@@ -191,6 +191,24 @@ class StrategyLiveViewTest < ActionDispatch::IntegrationTest
     assert_no_match(/No terminal is connected/i, response.body)
   end
 
+  test "a managed terminal that went silent is shown as a problem with its positions unmanaged" do
+    with_mt5_sandbox do
+      worker_node
+      patch broker_credential_path, params: { broker_credential: { server: "ExampleBroker-Demo", login: "500123",
+                                                                   password: "broker-trading-password", demo: "true" } }
+      @strategy.start!
+      instance = running_instance(@user)
+      instance.update_columns(last_heartbeat_at: 20.minutes.ago)
+
+      get strategy_path(@strategy)
+
+      assert_response :success
+      assert_match(/Your terminal has stopped reporting/, response.body)
+      assert_match(/Positions it opened are not being managed/, response.body)
+      assert_match(/20 minutes ago/, response.body)
+    end
+  end
+
   test "a terminal reporting for another strategy does not vouch for this one" do
     other = @user.strategies.create!(VALID.merge(name: "Other"))
     @strategy.start!
