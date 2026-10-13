@@ -67,7 +67,21 @@
   <%= render "components/alert", variant: :danger,
              title: instance.crash_looping? ? "Your terminal keeps failing" : "Your terminal stopped with an error",
              body: failed_body %>
-<% elsif instance.running? || instance.connecting? || instance.starting? %>
+<% elsif instance.running? %>
+  <%# Marked running, but no heartbeat within the timeout: the terminal has died or hung
+      without the platform being told. Its open positions have no one managing them, so
+      this is shown as a problem, not as a waiting state. %>
+  <% stale_body = capture do %>
+    <p>
+      Last heard from <%= instance.last_heartbeat_at ? "#{time_ago_in_words(instance.last_heartbeat_at)} ago" : "never" %>.
+      Positions it opened are not being managed until it reports again, so check them at your broker.
+    </p>
+    <%= render "strategies/terminal_diagnostics", instance:, diagnostics: %>
+  <% end %>
+  <%= render "components/alert", variant: :danger,
+             title: "Your terminal has stopped reporting",
+             body: stale_body %>
+<% elsif instance.connecting? || instance.starting? %>
   <% waiting_body = capture do %>
     <p>
       It is not reporting yet, so no positions, prices or profit are shown.
@@ -76,7 +90,7 @@
     <%= render "strategies/terminal_diagnostics", instance:, diagnostics: %>
   <% end %>
   <%= render "components/alert", variant: :info,
-             title: instance.running? ? "Your terminal has stopped reporting" : "Your terminal is #{instance.state}",
+             title: "Your terminal is #{instance.state}",
              body: waiting_body %>
 <% else %>
   <% stopped_body = capture do %>
