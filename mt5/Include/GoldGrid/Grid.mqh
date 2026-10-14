@@ -38,7 +38,10 @@ enum ENUM_TRADE_GATE
    GATE_ACCOUNT_NO_TRADING,
    GATE_MARKET_CLOSED,
    GATE_EMERGENCY_STOP,
-   GATE_DAILY_LOSS
+   GATE_DAILY_LOSS,
+   //--- The basket is at its exit and being closed: nothing new may be
+   //--- placed until it is confirmed flat (CGridEngine::BeginBasketClose).
+   GATE_BASKET_CLOSING
   };
 
 string TradeGateReason(const ENUM_TRADE_GATE gate)
@@ -67,6 +70,7 @@ string TradeGateReason(const ENUM_TRADE_GATE gate)
                                            "again on the platform to clear it";
       case GATE_DAILY_LOSS:         return "Daily loss limit reached — nothing opens until the broker's next "
                                            "trading day";
+      case GATE_BASKET_CLOSING:     return "The basket is closing — nothing new is placed until it is flat";
      }
    return "Unknown";
   }
@@ -142,6 +146,39 @@ struct SLadderReport
      }
   };
 
+//+------------------------------------------------------------------+
+//| THE BASKET CLOSE'S REQUESTS, per ticket.                          |
+//|                                                                   |
+//| Every close and cancel goes out asynchronously, and its outcome   |
+//| arrives later in OnTradeTransaction. Each ticket is paced on its  |
+//| own: one still executing is not sent again, one the broker        |
+//| refused is sent again on the next pass. Before, one 2 s pace      |
+//| covered the whole basket, so a single refused cancel — the rung   |
+//| nearest the price, frozen by the broker — waited 2 s while the    |
+//| market ran into it.                                               |
+//+------------------------------------------------------------------+
+//--- No answer yet: sent again after this.
+#define BASKET_RESEND_MS            1000
+//--- Executed: the open and order lists are given this long to drop it.
+#define BASKET_CONFIRM_WAIT_MS      3000
+//--- Refused for a reason the next quote can clear (requote, price
+//--- moved, frozen near the market, timeout): sent again this soon, at most
+//--- BASKET_FAST_RETRIES_MAX times per ticket, then at BASKET_RESEND_MS so a
+//--- broker that keeps refusing is not hammered.
+#define BASKET_FAST_RETRY_MS        100
+#define BASKET_FAST_RETRIES_MAX     10
+//--- Orders per side cancelled AHEAD of the closes: the rungs nearest the
+//--- price, the only ones the market can reach while the closes execute.
+#define BASKET_NEAR_ORDERS_PER_SIDE 2
+
+struct SCloseRequest
+  {
+   ulong    ticket;
+   bool     is_order;       // a cancel; else a close (a filled order's ticket becomes its position's)
+   ulong    due_at;         // ClockMs() from which it may be sent again
+   int      rejections;
+  };
+
 class CGridEngine
   {
 private:
@@ -182,6 +219,11 @@ private:
    //--- of these is confirmed closed in the broker's history.
    ulong             m_closing_tickets[];
    long              m_closing_ids[];
+   //--- THE PROTECTED CLOSING STATE: set by the first close pass, cleared
+   //--- once the basket is confirmed flat. While set, MayOpen refuses
+   //--- everything, so nothing can be placed alongside the close.
+   bool              m_closing;
+   SCloseRequest     m_requests[];
 
    bool              IsOurs(void) const
      {
@@ -205,6 +247,121 @@ private:
       Print(message);
      }
 
+   int               FindRequest(const ulong ticket, const bool is_order) const
+     {
+      for(int i = 0; i < ArraySize(m_requests); i++)
+         if(m_requests[i].ticket == ticket && m_requests[i].is_order == is_order)
+            return i;
+      return -1;
+     }
+
+   int               TrackRequest(const ulong ticket, const bool is_order)
+     {
+      int i = FindRequest(ticket, is_order);
+      if(i >= 0)
+         return i;
+      i = ArraySize(m_requests);
+      ArrayResize(m_requests, i + 1);
+      m_requests[i].ticket     = ticket;
+      m_requests[i].is_order   = is_order;
+      m_requests[i].due_at     = 0;
+      m_requests[i].rejections = 0;
+      return i;
+     }
+
+   bool              RequestDue(const ulong ticket, const bool is_order) const
+     {
+      int i = FindRequest(ticket, is_order);
+      return i < 0 || ClockMs() >= m_requests[i].due_at;
+     }
+
+   //--- Our resting orders, nearest the price that triggers them first, each
+   //--- with its side. A stop order's distance is signed: one the market has
+   //--- already reached reads negative and goes first.
+   void              OrdersByReach(ulong &tickets[], bool &buys[]) const
+     {
+      double bid = SymbolInfoDouble(m_symbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(m_symbol, SYMBOL_ASK);
+      double distance[];
+      ArrayResize(tickets, 0);
+      ArrayResize(buys, 0);
+
+      for(int i = OrdersTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = OrderGetTicket(i);
+         if(ticket == 0 || !OrderSelect(ticket) || !IsOurOrder())
+            continue;
+         ENUM_ORDER_TYPE type  = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+         double          price = OrderGetDouble(ORDER_PRICE_OPEN);
+         bool            buy   = type == ORDER_TYPE_BUY || type == ORDER_TYPE_BUY_STOP ||
+                                 type == ORDER_TYPE_BUY_LIMIT || type == ORDER_TYPE_BUY_STOP_LIMIT;
+         double          d;
+         switch(type)
+           {
+            case ORDER_TYPE_BUY_STOP:
+            case ORDER_TYPE_BUY_STOP_LIMIT:  d = price - ask; break;
+            case ORDER_TYPE_SELL_STOP:
+            case ORDER_TYPE_SELL_STOP_LIMIT: d = bid - price; break;
+            case ORDER_TYPE_BUY_LIMIT:       d = ask - price; break;
+            case ORDER_TYPE_SELL_LIMIT:      d = price - bid; break;
+            default:                         d = -DBL_MAX;    break;   // nothing of ours, but first if it is
+           }
+
+         //--- Insertion into the sorted list; a ladder is tens of orders.
+         int n = ArraySize(tickets);
+         ArrayResize(tickets, n + 1);
+         ArrayResize(buys, n + 1);
+         ArrayResize(distance, n + 1);
+         int k = n;
+         while(k > 0 && distance[k - 1] > d)
+           {
+            tickets[k]  = tickets[k - 1];
+            buys[k]     = buys[k - 1];
+            distance[k] = distance[k - 1];
+            k--;
+           }
+         tickets[k]  = ticket;
+         buys[k]     = buy;
+         distance[k] = d;
+        }
+     }
+
+   //--- One asynchronous cancel, if due. The terminal must be in async mode.
+   //--- True if it went.
+   bool              SendCancel(const ulong ticket)
+     {
+      if(!RequestDue(ticket, true))
+         return false;
+      int i = TrackRequest(ticket, true);
+      m_requests[i].due_at = ClockMs() + BASKET_RESEND_MS;
+      if(m_trade.OrderDelete(ticket))
+         return true;
+      NoteCloseOutcome(ticket, true, m_trade.ResultRetcode());
+      Complain((int)m_trade.ResultRetcode(),
+               StringFormat("GoldGrid: could not send the cancel of order #%I64u — %s (%d)", ticket,
+                            m_trade.ResultRetcodeDescription(), m_trade.ResultRetcode()));
+      return false;
+     }
+
+   //--- One asynchronous close, if due. The terminal must be in async mode.
+   //--- 1 sent, 0 not due (or no longer ours to close), -1 refused at the call.
+   int               SendClose(const ulong ticket, const string why)
+     {
+      if(!RequestDue(ticket, false))
+         return 0;
+      if(!PositionSelectByTicket(ticket) || !IsOurs())
+         return 0;
+      int i = TrackRequest(ticket, false);
+      m_requests[i].due_at = ClockMs() + BASKET_RESEND_MS;
+      if(m_trade.PositionClose(ticket))
+         return 1;
+      NoteCloseOutcome(ticket, false, m_trade.ResultRetcode());
+      Complain((int)m_trade.ResultRetcode(),
+               StringFormat("GoldGrid: could not send the close of #%I64u (%s) — %s (%d)", ticket, why,
+                            m_trade.ResultRetcodeDescription(), m_trade.ResultRetcode()));
+      return -1;
+     }
+
 public:
                      CGridEngine(void)
      {
@@ -221,6 +378,7 @@ public:
       m_order_limit_override = 0;
       m_filled_cycle = 0;
       m_filled_keys = "";
+      m_closing = false;
      }
 
    //--- Everything this object remembers about the current run. A real
@@ -235,6 +393,8 @@ public:
       m_filled_keys = "";
       ArrayResize(m_closing_tickets, 0);
       ArrayResize(m_closing_ids, 0);
+      m_closing = false;
+      ArrayResize(m_requests, 0);
       ArrayResize(m_commission_ids, 0);
       ArrayResize(m_commission_values, 0);
       m_trail_complaint_at = 0;
@@ -392,7 +552,8 @@ public:
      {
       m_gate = GATE_OPEN;
 
-      if(!config_is_fresh)                       m_gate = GATE_CONFIG_STALE;
+      if(m_closing)                              m_gate = GATE_BASKET_CLOSING;
+      else if(!config_is_fresh)                  m_gate = GATE_CONFIG_STALE;
       else if(strategy.emergency_stop)           m_gate = GATE_EMERGENCY_STOP;
       else if(DailyLossBreached(strategy))       m_gate = GATE_DAILY_LOSS;
       else if(!strategy.IsRunning())             m_gate = GATE_NOT_RUNNING;
@@ -638,8 +799,8 @@ public:
    //--- FAILED. Used by the risk halts, which want everything gone.
    //--- `parallel`: send every close at once instead of waiting for each
    //--- reply before sending the next (see ClosePosition). The grid's basket
-   //--- close uses it; the single-position strategies close one position and
-   //--- keep the synchronous path.
+   //--- close has its own paced pass (CloseBasketPass); the single-position
+   //--- strategies close one position and keep the synchronous path.
    int               CloseAllPositions(const string why, const bool parallel = false)
      {
       ulong tickets[];
@@ -1953,14 +2114,26 @@ public:
       return deleted;
      }
 
-   //--- Starts a basket close: forgets the previous close's positions and
-   //--- notes the ones open now.
+   //--- Starts a basket close: enters the protected closing state, forgets
+   //--- the previous close's positions and requests, and notes the ones
+   //--- open now.
    void              BeginBasketClose(void)
      {
+      m_closing = true;
       ArrayResize(m_closing_tickets, 0);
       ArrayResize(m_closing_ids, 0);
+      ArrayResize(m_requests, 0);
       NoteOpenPositions();
      }
+
+   //--- Leaves the protected closing state: the basket is confirmed flat.
+   void              EndBasketClose(void)
+     {
+      m_closing = false;
+      ArrayResize(m_requests, 0);
+     }
+
+   bool              IsClosing(void) const { return m_closing; }
 
    //--- Adds every open position of ours not yet on the closing list. Called
    //--- on each close pass, so a rung that fills while the basket is being
@@ -1987,22 +2160,146 @@ public:
 
    int               ClosingPositions(void) const { return ArraySize(m_closing_tickets); }
 
-   //--- One pass of the close. POSITIONS FIRST, then every order: a rung that
-   //--- fills between the two is still an open position on the next pass,
-   //--- and the next pass closes it. The other way round, cancelling first,
-   //--- would leave the same fill with nothing to catch it. Returns how many
-   //--- closes failed; `cancelled` gets how many orders went.
+   //--- The broker's answer to one of the close's requests, from
+   //--- OnTradeTransaction (or the terminal's own refusal at the call).
+   //--- Decides when that ticket may be sent again.
+   void              NoteCloseOutcome(const ulong ticket, const bool is_order, const uint code)
+     {
+      if(!m_closing || ticket == 0)
+         return;
+      int i = TrackRequest(ticket, is_order);
+      ulong now = ClockMs();
+
+      if(code == TRADE_RETCODE_DONE || code == TRADE_RETCODE_PLACED || code == TRADE_RETCODE_POSITION_CLOSED)
+        {
+         m_requests[i].due_at = now + BASKET_CONFIRM_WAIT_MS;
+         return;
+        }
+      //--- Part of the volume closed: the rest goes on the next pass.
+      if(code == TRADE_RETCODE_DONE_PARTIAL)
+        {
+         m_requests[i].due_at = now;
+         return;
+        }
+
+      m_requests[i].rejections++;
+      bool transient = code == TRADE_RETCODE_REQUOTE || code == TRADE_RETCODE_PRICE_CHANGED ||
+                       code == TRADE_RETCODE_PRICE_OFF || code == TRADE_RETCODE_FROZEN ||
+                       code == TRADE_RETCODE_TIMEOUT || code == TRADE_RETCODE_LOCKED ||
+                       code == TRADE_RETCODE_CONNECTION || code == TRADE_RETCODE_REJECT;
+      m_requests[i].due_at = now + (transient && m_requests[i].rejections <= BASKET_FAST_RETRIES_MAX
+                                    ? BASKET_FAST_RETRY_MS : BASKET_RESEND_MS);
+     }
+
+   //--- One pass of the close. Sends only what is due — a ticket whose
+   //--- request is still executing is left alone (see SCloseRequest) — so it
+   //--- runs on every tick, timer and transaction without flooding the
+   //--- broker. In this order, all asynchronously:
+   //---
+   //---   1. cancels for the orders IN REACH: the nearest
+   //---      BASKET_NEAR_ORDERS_PER_SIDE on each side. Price has to cross
+   //---      those before any other, so they are the only orders that can
+   //---      fill while the closes execute.
+   //---   2. every close.
+   //---   3. cancels for every other order.
+   //---
+   //--- The broker works through requests in the order they arrive. Closes
+   //--- first (as before) put the cancels behind every close, so a basket of
+   //--- 16 left the nearest rung live for all 16 executions — exactly while
+   //--- the price that carried the basket to its target kept moving into it.
+   //--- Cancels first put 40 resting orders ahead of the closes. Two per side
+   //--- costs the closes two cancels, and takes away the only rungs that
+   //--- could still fill. A rung that fills anyway is closed the moment its
+   //--- fill arrives (OnTradeTransaction) and on every pass after.
+   //---
+   //--- Returns how many closes could not be sent; `closes` and `cancelled`
+   //--- get how many requests went.
    int               CloseBasketPass(const string why, int &closes, int &cancelled)
      {
+      m_closing = true;   // also after a restart that found the record CLOSING
       NoteOpenPositions();
-      //--- Both sent in parallel: every close leaves before the first reply
-      //--- arrives, then every cancel. The caller paces passes 2 s apart, so
-      //--- a close still executing is not sent again in the meantime.
-      closes     = TotalPositions();
-      int failed = CloseAllPositions(why, true);
-      closes    -= failed;
-      cancelled  = DeleteAllOrders(true);
+      closes    = 0;
+      cancelled = 0;
+      int failed = 0;
+
+      ulong orders[];
+      bool  buys[];
+      OrdersByReach(orders, buys);
+      int  n = ArraySize(orders);
+      bool sent_early[];
+      ArrayResize(sent_early, n);
+      ArrayInitialize(sent_early, false);
+
+      m_trade.SetAsyncMode(true);
+
+      int near_buy = 0, near_sell = 0;
+      for(int i = 0; i < n; i++)
+        {
+         if((buys[i] ? near_buy : near_sell) >= BASKET_NEAR_ORDERS_PER_SIDE)
+            continue;
+         if(buys[i]) near_buy++; else near_sell++;
+         sent_early[i] = true;
+         if(SendCancel(orders[i]))
+            cancelled++;
+        }
+
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket == 0 || !PositionSelectByTicket(ticket) || !IsOurs())
+            continue;
+         int sent = SendClose(ticket, why);
+         if(sent > 0)
+            closes++;
+         else if(sent < 0)
+            failed++;
+        }
+
+      for(int i = 0; i < n; i++)
+         if(!sent_early[i] && SendCancel(orders[i]))
+            cancelled++;
+
+      m_trade.SetAsyncMode(false);
       return failed;
+     }
+
+   //--- A rung that filled while the basket is closing: its close goes out
+   //--- now, from the fill's transaction, not on the next pass.
+   void              CloseFillNow(const ulong ticket, const string why)
+     {
+      NoteOpenPositions();
+      m_trade.SetAsyncMode(true);
+      SendClose(ticket, why);
+      m_trade.SetAsyncMode(false);
+     }
+
+   //--- Positions of ours that are rungs of a cycle EARLIER than `cycle`:
+   //--- an order of the closed basket that filled after its cancel was sent,
+   //--- or that the order list had not shown yet. An entry nobody decided on
+   //--- — the closed cycle's target is already banked — so it is closed at
+   //--- once rather than left to the next basket. Returns how many closed.
+   int               CloseStaleRungs(const long strategy_id, const int cycle)
+     {
+      ulong doomed[];
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket == 0 || !PositionSelectByTicket(ticket) || !IsOurs())
+            continue;
+         string comment = PositionGetString(POSITION_COMMENT);
+         int    c       = CycleFromComment(comment);
+         if(c <= 0 || c >= cycle || LevelFromComment(comment) <= 0 || StrategyIdFromComment(comment) != strategy_id)
+            continue;
+         int n = ArraySize(doomed);
+         ArrayResize(doomed, n + 1);
+         doomed[n] = ticket;
+        }
+
+      int closed = 0;
+      for(int i = 0; i < ArraySize(doomed); i++)
+         if(ClosePosition(doomed[i], "a rung of an earlier cycle filled after its basket closed"))
+            closed++;
+      return closed;
      }
 
    //--- TRULY FLAT: nothing of ours open, nothing of ours resting, and every

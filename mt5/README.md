@@ -433,27 +433,42 @@ block of `GoldGrid.mq5`.
 2. **ARMED.** The ladder is complete. Nothing is placed; the basket is watched.
    A rung found missing (deleted by hand, say) sends the cycle back to PLACING.
 3. **CLOSING.** The combined floating P/L reached the target (or the basket
-   stop loss). Every position is closed, *then* every order cancelled, on
-   every pass until the broker's history confirms each close and nothing of
-   ours is left. A rung that fills during the close is an open position on
-   the next pass and is closed too. One log line gives the realised result.
-   The closes are sent **all at once** (asynchronously), not one after
-   another: each close is a round trip to the broker (about 200 ms on the
-   demo server), so ten sent in turn took two seconds while the price moved.
-   Sent together they execute within roughly one round trip. The cancels go
-   the same way, right behind them, and one log line per pass says what went.
-   A close refused for a price reason (requote, price changed, off quotes)
-   is retried after 500 ms, up to three times; any other refusal keeps the
-   2 s pace, so a broker that keeps refusing is not hammered. Passes are 2 s
-   apart, so a close still executing is not sent twice. Rejections are
+   stop loss). The EA enters a **protected closing state**: from that moment
+   the risk gate refuses every new order (`GATE_BASKET_CLOSING`), and the
+   first close pass goes out before anything is logged or persisted. Each
+   pass sends, all asynchronously and in this order:
+   1. cancels for the **two nearest orders on each side** — price has to
+      cross those before any other, so they are the only rungs that can fill
+      while the closes execute;
+   2. every close;
+   3. cancels for every other order.
+
+   The broker works through requests in arrival order, so this takes the
+   reachable rungs away first without putting forty cancels ahead of the
+   closes. Passes run on every tick, timer event and trade transaction, and
+   the timer runs every 100 ms while closing. Each close and cancel is paced
+   **per ticket**: one still executing is not sent again (resent after 1 s
+   with no answer); one refused for a reason the next quote clears
+   (requote, price changed, off quotes, frozen, timeout) is resent on the
+   next pass, up to ten times, then once a second; any other refusal waits a
+   second, so a broker that keeps refusing is not hammered. Rejections are
    logged as `REJECTED by the broker`, throttled to one line per 5 s with a
-   count. A rung that fills during the close (its cancel arrived too late) is
-   closed the moment the fill is reported. If the broker sets the symbol to
+   count. The platform is not called for up to 15 s while closing (each
+   WebRequest blocks the EA), and is reported to the moment the close ends.
+
+   A rung that fills during the close (its cancel arrived too late) is
+   closed the moment the fill is reported. The close ends when nothing of
+   ours is open or resting, the broker's history confirms every close, and
+   no ladder order was sent in the last 2 s (one sent just before the close
+   may not be listed yet). A rung of the closed cycle that still fills
+   during the pause is closed at once. If the broker sets the symbol to
    **close-only**, the basket is still closed at its target or on a risk
    halt; nothing new is placed until full trading returns. While the ladder
-   is being placed, the basket is checked between sends, so a rung that fills
-   mid-placement and takes the basket to its target is closed on the next
-   tick, not after the rest of the placement pass.
+   is being placed, the basket is checked between sends, and again right
+   after the placement pass, so a rung that fills mid-placement and takes
+   the basket to its target is closed at once. One log line gives the
+   realised result; the CLOSING line says how many microseconds the first
+   pass took to send.
 4. **COOLDOWN.** The cycle number goes up by one. The pause is wall clock and
    persisted, so a restart does not shorten it and a quiet market does not
    stretch it. Then PLACING again, anchored at the new market.
