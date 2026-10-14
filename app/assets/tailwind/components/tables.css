@@ -8,6 +8,13 @@
 @layer components {
   .table-wrap {
     @apply w-full overflow-x-auto rounded-card border border-border;
+    /* A wide table must not widen the page. Without this, a table with many
+       columns makes mobile browsers zoom the whole layout out to fit it, even
+       though the box itself scrolls. paint containment keeps its width inside. */
+    contain: paint;
+    /* A sideways swipe or two-finger drag over the table scrolls only the table,
+       never the page behind it. */
+    overscroll-behavior-x: contain;
   }
 
   .table {

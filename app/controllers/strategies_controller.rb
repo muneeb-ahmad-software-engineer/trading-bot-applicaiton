@@ -21,6 +21,8 @@ class StrategiesController < ApplicationController
     # does not belong to it would vouch for numbers it never sent.
     @connection = @strategy.terminal_connection
     @closed_count = @strategy.positions.closed.count
+    @closed_cycles = @strategy.closed_cycles
+    @realized_net = @strategy.realized_net
     # What is executing this, if anything. Loaded on the page that asks the
     # question rather than left to the settings screen.
     @instance = current_user.mt5_instances.not_terminated.first

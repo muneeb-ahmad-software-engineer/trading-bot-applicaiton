@@ -141,6 +141,44 @@ class Strategy < ApplicationRecord
 
   scope :ordered, -> { order(created_at: :desc) }
 
+  # A grid closes its whole ladder in one go, so positions closed a few seconds
+  # apart are one cycle. The cycle's net is what the basket rule judged; one
+  # position's loss inside a profitable cycle is how the grid is meant to work.
+  CYCLE_GAP = 30.seconds
+
+  ClosedCycle = Data.define(:closed_at, :positions, :net, :first_id, :members)
+
+  # The most recent closed cycles, newest first.
+  def closed_cycles(limit: 10)
+    positions.closed.order(:closed_at, :id).last(500)
+             .chunk_while { |earlier, later| cycle_gap?(earlier, later) }
+             .map { |group| build_cycle(group) }
+             .last(limit)
+             .reverse
+  end
+
+  # The cycle a closed position belongs to, found from the positions closed
+  # around it. A cycle is short, so a day either side is always enough.
+  def closed_cycle_containing(position)
+    window = (position.closed_at - 1.day)..(position.closed_at + 1.day)
+    positions.closed.where(closed_at: window).order(:closed_at, :id)
+             .chunk_while { |earlier, later| cycle_gap?(earlier, later) }
+             .find { |group| group.any? { |member| member.id == position.id } }
+             &.then { |group| build_cycle(group) }
+  end
+
+  # Everything this strategy has realized, including swap and commission.
+  def realized_net
+    positions.closed.sum("COALESCE(profit, 0) + COALESCE(swap, 0) + COALESCE(commission, 0)")
+  end
+
+  def cycle_gap?(earlier, later) = later.closed_at - earlier.closed_at <= CYCLE_GAP
+
+  def build_cycle(group)
+    ClosedCycle.new(closed_at: group.last.closed_at, positions: group.size, net: group.sum(&:net_profit),
+                    first_id: group.first.id, members: group)
+  end
+
   # Configuration may be edited at any time: the EA re-fetches as soon as the
   # config_version in a report response changes. Only the strategy type is
   # fixed while running, because switching it would hand the open positions

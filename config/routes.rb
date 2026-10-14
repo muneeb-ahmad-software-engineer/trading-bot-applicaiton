@@ -83,6 +83,7 @@ Rails.application.routes.draw do
   get "activity" => "activity#index", as: :activity
   get "notifications" => "notifications#index", as: :notifications
   get "history" => "trading_history#index", as: :trading_history
+  get "history/cycles/:position_id" => "trading_history_cycles#show", as: :trading_history_cycle
 
   get   "settings/notifications" => "notification_settings#show", as: :notification_settings
   patch "settings/notifications" => "notification_settings#update"

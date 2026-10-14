@@ -31,8 +31,11 @@
 #              so every cycle state is resumed from the persisted record
 #   gridlimit  the same ladder with the broker pretending to allow 40 orders
 #   griddailyloss the same ladder with a $15 daily loss limit
+#   yourgrid   the live grid's own settings (25/25 at 120 points, $0.70 target)
 #
 # Environment:
+#   MT5_BACKTEST_DEPOSIT  starting balance in USD (default 10000)
+#   MT5_BACKTEST_LEVERAGE leverage as the tester takes it (default 1:100)
 #   MT5_BACKTEST_MODEL    0 = every tick generated from M1 (default, fast)
 #                         4 = every tick based on REAL ticks (slower, needs the
 #                             broker's tick history, closer to live)
@@ -68,6 +71,8 @@ RESULTS="$WORK/results"
 AGENT_LOGS="$TERMINAL/Tester/Agent-127.0.0.1-3000/logs"
 TIMEOUT_SECONDS="${MT5_BACKTEST_TIMEOUT:-1800}"
 MODEL="${MT5_BACKTEST_MODEL:-0}"
+DEPOSIT="${MT5_BACKTEST_DEPOSIT:-10000}"
+LEVERAGE="${MT5_BACKTEST_LEVERAGE:-1:100}"
 
 PAUSE_APP=0
 MONTHLY=0
@@ -88,7 +93,7 @@ SWEEP_TRAILING="${SWEEP_TRAILING:-300 500 1000 1500 2000}"
 SWEEP_CATEGORY="${SWEEP_CATEGORY:-reversal}"
 SWEEP_WEEKS="${SWEEP_WEEKS:-2025.07.07-2025.07.12 2025.08.18-2025.08.23 2025.09.22-2025.09.27 2025.10.20-2025.10.25 2025.12.08-2025.12.13 2026.01.19-2026.01.24 2026.03.09-2026.03.14 2026.06.15-2026.06.20 2026.09.14-2026.09.19}"
 
-ALL_SCENARIOS=(baseline chaos trailing dailyloss spread grid gridchaos gridrestart gridlimit griddailyloss)
+ALL_SCENARIOS=(baseline chaos trailing dailyloss spread grid gridchaos gridrestart gridlimit griddailyloss yourgrid)
 if [ "$MONTHLY" = 1 ]; then
   FIRST_MONTH="${1:-2025.01}"
   LAST_MONTH="${2:-2026.09}"
@@ -127,6 +132,9 @@ InpTestGridPauseSeconds=10"
     gridrestart) printf '%s\n%s\nInpChaosEveryMinutes=10\nInpChaosSeed=3\nInpChaosRestartOnly=true\n' "$common" "$grid" ;;
     gridlimit) printf '%s\n%s\nInpTestOrderLimit=40\nInpChaosEveryMinutes=0\n' "$common" "$grid" ;;
     griddailyloss) printf '%s\n%s\nInpTestMaxDailyLoss=15\nInpChaosEveryMinutes=0\n' "$common" "$grid" ;;
+    # The live Phase 9 grid's own settings: 25 per side, 120 points apart, a $0.70
+    # target, 500-point spread limit. Use this one to judge the strategy you run.
+    yourgrid)  printf '%s\nInpTestCategory=0\nInpTestGridSpacingPoints=120\nInpTestGridBuyOrders=25\nInpTestGridSellOrders=25\nInpTestGridTargetMoney=0.7\nInpTestGridPauseSeconds=10\nInpTestMaxSpreadPoints=500\nInpChaosEveryMinutes=0\n' "$common" ;;
     *) echo "unknown scenario: $1 (expected one of: ${ALL_SCENARIOS[*]})" >&2; exit 2 ;;
   esac
 }
@@ -246,9 +254,9 @@ Model=$MODEL
 FromDate=$from
 ToDate=$to
 ForwardMode=0
-Deposit=10000
+Deposit=$DEPOSIT
 Currency=USD
-Leverage=1:100
+Leverage=$LEVERAGE
 ExecutionMode=0
 Optimization=0
 Visual=0

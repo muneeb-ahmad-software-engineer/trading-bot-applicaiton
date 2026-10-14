@@ -1,0 +1,123 @@
+<% content_for :title, "Cycle · #{Rails.application.config.x.product.name}" %>
+<% content_for :head do %><meta name="robots" content="noindex"><% end %>
+
+<%= render layout: "shared/app_shell",
+           locals: { title: "Closed cycle",
+                     subtitle: "#{@strategy.name} · #{@cycle.closed_at.to_fs(:short)}" } do %>
+  <%= link_to "← Back to trading history", trading_history_path(strategy_id: @strategy.id), class: "link" %>
+
+  <%# Summary as a table, so each figure has a label beside it. Values wrap inside
+      their cell; the table scrolls inside its own box rather than the page. %>
+  <div class="mt-4 card">
+    <div class="card-header">
+      <div>
+        <h2 class="heading-4">Cycle summary</h2>
+        <p class="caption mt-0.5">Positions closed together, counted as one result.</p>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="table">
+        <caption class="sr-only">Summary of this closed cycle</caption>
+        <tbody>
+          <tr>
+            <th scope="row">Profit (net)</th>
+            <td class="col-numeric figure-sm <%= profit_tone(@cycle.net) %>">
+              <%= signed_money(@cycle.net) %>
+              <span class="sr-only"><%= profit_label(@cycle.net) %></span>
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Result</th>
+            <td class="col-numeric"><%= @reached ? "Reached take profit" : "Closed below take profit" %></td>
+          </tr>
+          <tr>
+            <th scope="row">Invested (gold value)</th>
+            <td class="col-numeric"><%= number_to_currency(@exposure) %></td>
+          </tr>
+          <tr>
+            <th scope="row">Lots</th>
+            <td class="col-numeric"><%= number_with_precision(@lots, precision: 2) %> in <%= pluralize(@cycle.positions, "position") %></td>
+          </tr>
+          <tr>
+            <th scope="row">Started</th>
+            <td class="col-numeric"><%= @started_at.to_fs(:long) %></td>
+          </tr>
+          <tr>
+            <th scope="row">Ended</th>
+            <td class="col-numeric"><%= @cycle.closed_at.to_fs(:long) %></td>
+          </tr>
+          <tr>
+            <th scope="row">Duration</th>
+            <td class="col-numeric"><%= distance_of_time_in_words(@started_at, @cycle.closed_at, include_seconds: true) %></td>
+          </tr>
+          <tr>
+            <th scope="row">Balance at start</th>
+            <td class="col-numeric">
+              <% if @before %>
+                <%= number_to_currency(@before.balance) %>
+                <span class="caption block">sampled <%= @before.recorded_at.to_fs(:short) %></span>
+              <% else %>
+                <span class="caption">No record</span>
+              <% end %>
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Equity at start</th>
+            <td class="col-numeric"><%= @before ? number_to_currency(@before.equity) : "No record" %></td>
+          </tr>
+          <tr>
+            <th scope="row">Margin in use at start</th>
+            <td class="col-numeric"><%= @before&.margin ? number_to_currency(@before.margin) : "No record" %></td>
+          </tr>
+          <tr>
+            <th scope="row">Balance after</th>
+            <td class="col-numeric">
+              <% if @after %>
+                <%= number_to_currency(@after.balance) %>
+                <span class="caption block">sampled <%= @after.recorded_at.to_fs(:short) %></span>
+              <% else %>
+                <span class="caption">No sample after this cycle yet</span>
+              <% end %>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="mt-4">
+    <h2 class="heading-4 mb-3">Trades in this cycle</h2>
+    <div class="table-wrap">
+      <table class="table">
+        <caption class="sr-only">Positions in this cycle</caption>
+        <thead>
+          <tr>
+            <th scope="col">Ticket</th>
+            <th scope="col">Side</th>
+            <th scope="col" class="col-numeric">Lots</th>
+            <th scope="col" class="col-numeric hidden sm:table-cell">Open</th>
+            <th scope="col" class="col-numeric hidden sm:table-cell">Close</th>
+            <th scope="col" class="col-numeric">Net P/L</th>
+            <th scope="col" class="hidden md:table-cell">Closed</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% @cycle.members.each do |position| %>
+            <tr>
+              <td class="mono"><%= position.ticket %></td>
+              <td><%= position.direction.capitalize %></td>
+              <td class="col-numeric"><%= position.volume %></td>
+              <td class="col-numeric hidden sm:table-cell"><%= position.open_price %></td>
+              <td class="col-numeric hidden sm:table-cell"><%= position.close_price || "—" %></td>
+              <td class="col-numeric <%= profit_tone(position.net_profit) %>">
+                <%= signed_money(position.net_profit) %>
+                <span class="sr-only"><%= profit_label(position.net_profit) %></span>
+              </td>
+              <td class="figure-sm hidden md:table-cell"><%= position.closed_at.to_fs(:short) %></td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+<% end %>

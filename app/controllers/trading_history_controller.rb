@@ -30,6 +30,14 @@ class TradingHistoryController < ApplicationController
     # and it grows without bound as history accumulates.
     @realised_profit = scope.sum(NET_PROFIT_SQL)
     @closed_count = @total
+
+    # The closes grouped into the cycles they were closed in, so a grid's
+    # ladder reads as one result. Follows the strategy filter, so it always
+    # matches the list below it.
+    @cycles = @strategies
+                .select { |strategy| @filter[:strategy_id].blank? || strategy.id.to_s == @filter[:strategy_id].to_s }
+                .map { |strategy| [ strategy, strategy.closed_cycles(limit: 10) ] }
+                .reject { |_strategy, cycles| cycles.empty? }
   end
 
   private
