@@ -209,6 +209,22 @@ class StrategyLiveViewTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "closed positions are shown as cycles with their net, not one line per position" do
+    base = 2.hours.ago
+    [ [ base, 9.0 ], [ base + 3.seconds, -12.0 ] ].each_with_index do |(at, profit), i|
+      @strategy.positions.create!(ticket: "c#{i}", direction: "buy", volume: 0.01, open_price: 2300,
+                                  opened_at: at - 1.hour, closed_at: at, close_price: 2301,
+                                  profit:, swap: 0, commission: 0)
+    end
+
+    get strategy_path(@strategy)
+
+    assert_response :success
+    assert_match(/Closed cycles/, response.body)
+    assert_match(/2 positions/, response.body)
+    assert_match(/Closed below take profit/, response.body)
+  end
+
   test "a terminal reporting for another strategy does not vouch for this one" do
     other = @user.strategies.create!(VALID.merge(name: "Other"))
     @strategy.start!

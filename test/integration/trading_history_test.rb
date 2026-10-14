@@ -36,6 +36,21 @@ class TradingHistoryTest < ActionDispatch::IntegrationTest
     assert_match(/\+30\.00/, response.body)
   end
 
+  test "history shows the closes grouped into cycles, with each cycle's net" do
+    base = 2.hours.ago
+    close_position(ticket: "a", profit: 9, closed_at: base)
+    close_position(ticket: "b", profit: -12, closed_at: base + 2.seconds)
+    close_position(ticket: "c", profit: 4, closed_at: base + 3.hours)
+
+    get trading_history_path(strategy_id: @strategy.id)
+
+    assert_response :success
+    assert_match(/Closed cycles/, response.body)
+    assert_match(/2 positions/, response.body)
+    assert_match(/1 position/, response.body)
+    assert_match(/Closed below take profit/, response.body)
+  end
+
   test "open positions never appear in history" do
     @strategy.positions.create!(ticket: "open", direction: "buy", volume: 0.01,
                                open_price: 2300, opened_at: 1.hour.ago)

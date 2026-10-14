@@ -63,6 +63,31 @@
     </div></div>
   </div>
 
+  <% if @cycles.any? %>
+    <div class="card mt-4">
+      <div class="card-header">
+        <div>
+          <h2 class="heading-4">Closed cycles</h2>
+          <p class="caption mt-0.5">Positions closed together count as one result. Newest first, up to 10 per strategy.</p>
+        </div>
+      </div>
+      <ul class="card-body divide-y divide-border">
+        <% @cycles.each do |strategy, cycles| %>
+          <% cycles.each do |cycle| %>
+            <% reached = strategy.basket_take_profit.present? && cycle.net >= strategy.basket_take_profit %>
+            <li class="flex flex-wrap items-center justify-between gap-2 py-2">
+              <%= link_to trading_history_cycle_path(cycle.first_id), class: "body-sm link" do %><%= strategy.name %> · <%= cycle.closed_at.to_fs(:long) %> · <%= pluralize(cycle.positions, "position") %><% end %>
+              <span class="flex items-center gap-3">
+                <span class="figure-sm <%= profit_tone(cycle.net) %>"><%= signed_money(cycle.net) %></span>
+                <span class="caption"><%= reached ? "Reached take profit" : "Closed below take profit" %></span>
+              </span>
+            </li>
+          <% end %>
+        <% end %>
+      </ul>
+    </div>
+  <% end %>
+
   <div class="mt-4">
     <% if @positions.any? %>
       <%= render "trading/positions_table", positions: @positions, closed: true,

@@ -123,6 +123,34 @@
       </div>
     <% end %>
 
+    <% if @closed_cycles.any? %>
+      <%# One line per cycle, not per position: a grid closes its ladder together, so the
+          cycle's net is the result that matters. Positions inside it may each lose. %>
+      <div class="card mb-4">
+        <div class="card-header">
+          <div>
+            <h2 class="heading-4">Closed cycles</h2>
+            <p class="caption mt-0.5">
+              Positions closed together count as one result. Realized so far:
+              <span class="figure-sm"><%= signed_money(@realized_net) %></span>
+            </p>
+          </div>
+        </div>
+        <ul class="card-body divide-y divide-border">
+          <% @closed_cycles.each do |cycle| %>
+            <% reached = @strategy.basket_take_profit.present? && cycle.net >= @strategy.basket_take_profit %>
+            <li class="flex flex-wrap items-center justify-between gap-2 py-2">
+              <span class="body-sm"><%= cycle.closed_at.to_fs(:long) %> · <%= pluralize(cycle.positions, "position") %></span>
+              <span class="flex items-center gap-3">
+                <span class="figure-sm"><%= signed_money(cycle.net) %></span>
+                <span class="caption"><%= reached ? "Reached take profit" : "Closed below take profit" %></span>
+              </span>
+            </li>
+          <% end %>
+        </ul>
+      </div>
+    <% end %>
+
     <% if @orders.any? %>
       <div class="mb-4">
         <h2 class="heading-4 mb-3">Pending orders</h2>
