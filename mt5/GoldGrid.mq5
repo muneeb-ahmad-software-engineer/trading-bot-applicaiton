@@ -147,6 +147,14 @@ ulong NowMs(void) { return ClockMs(); }   // Include/GoldGrid/Clock.mqh
 
 ulong    last_report_at = 0;
 ulong    last_config_at = 0;
+
+//--- While a grid basket closes, the timer runs this often, so a refused
+//--- close or cancel is sent again within 100 ms even when no tick arrives,
+//--- and the platform is not called (each WebRequest blocks the EA for its
+//--- whole round trip, up to its timeout) for up to CLOSING_NETWORK_DEFER_MS.
+#define CLOSING_TIMER_MS          100
+#define CLOSING_NETWORK_DEFER_MS  15000
+bool     g_fast_timer   = false;
 string   halt_reason    = "";     // non-empty means: do not open anything
 bool     halted         = false;
 string   last_gate_note = "";
@@ -886,20 +894,69 @@ void OnTimer()
    if(g_strategy.category == CATEGORY_GRID)
       g_cycle.Touch();
 
+   //--- Decisions first. The platform calls below block this thread for
+   //--- their whole round trip, and a basket at its target must not wait
+   //--- behind them.
+   ManageBaskets();
+
    //--- The tester has no platform to refresh from or report to.
    if(IsTester())
      {
-      ManageBaskets();
+      SyncTimer();
       return;
      }
 
-   if(NowMs() - last_config_at >= (ulong)InpConfigSeconds * 1000)
-      RefreshConfiguration();
+   //--- While a basket closes, the platform waits (up to
+   //--- CLOSING_NETWORK_DEFER_MS): a WebRequest in the middle of the close
+   //--- would hold every retry and every rung's fill behind it.
+   bool closing = g_strategy.category == CATEGORY_GRID && g_cycle.Is(CYCLE_CLOSING) &&
+                  g_cycle.MsInState() < CLOSING_NETWORK_DEFER_MS;
+   if(!closing)
+     {
+      bool talked = false;
+      if(NowMs() - last_config_at >= (ulong)InpConfigSeconds * 1000)
+        {
+         RefreshConfiguration();
+         talked = true;
+        }
+      if(NowMs() - last_report_at >= (ulong)InpReportSeconds * 1000)
+        {
+         SendReport();
+         talked = true;
+        }
+      //--- A round trip can take seconds, and the ticks that arrived
+      //--- meanwhile were coalesced into one. Whatever moved — or whatever a
+      //--- fresh configuration changed (a stop, an emergency stop) — is acted
+      //--- on now, not on the next timer event.
+      if(talked)
+         ManageBaskets();
+     }
 
-   ManageBaskets();
+   SyncTimer();
+  }
 
-   if(NowMs() - last_report_at >= (ulong)InpReportSeconds * 1000)
-      SendReport();
+//--- The timer runs every CLOSING_TIMER_MS while a grid basket closes, and
+//--- every second otherwise. Leaving the close reports at once, so the
+//--- platform shows the flat account without waiting for the interval.
+void SyncTimer()
+  {
+   bool fast = g_strategy.category == CATEGORY_GRID && g_cycle.Is(CYCLE_CLOSING);
+   if(fast == g_fast_timer)
+      return;
+   EventKillTimer();
+   if(fast && !EventSetMillisecondTimer(CLOSING_TIMER_MS))
+     {
+      PrintFormat("GoldGrid: could not set the %d ms closing timer (error %d) — the close runs on the 1 s timer and ticks",
+                  CLOSING_TIMER_MS, GetLastError());
+      fast = false;
+     }
+   if(!fast)
+     {
+      EventSetTimer(1);
+      if(g_fast_timer)
+         last_report_at = 0;
+     }
+   g_fast_timer = fast;
   }
 
 //+------------------------------------------------------------------+
@@ -1267,13 +1324,10 @@ ulong  g_started_ms           = 0;     // OnInit, for the start-up settle
 string g_ladder_gate_note     = "";
 ENUM_CYCLE_STATE g_ladder_gate_state = CYCLE_INITIALIZING;   // where the note was set (GateNoteApplies)
 int    g_ladder_gate_cycle    = 0;
-//--- Close passes are 2 s apart, so an asynchronous close still executing is
-//--- not sent again; a close the broker refused outright is retried after
-//--- 500 ms (NoteCloseRejection).
+//--- Withdrawals outside the basket close (a stopped strategy, COOLDOWN,
+//--- RECOVERY) are 2 s apart. The basket close itself paces each close and
+//--- cancel on its own (SCloseRequest in Grid.mqh) and runs on every event.
 #define CLOSE_RETRY_PACE_MS            2000
-#define CLOSE_RETRY_AFTER_REJECTION_MS 500
-#define CLOSE_FAST_RETRIES_MAX         3      // per close; then the 2 s pace
-int    g_close_fast_retries   = 0;
 int    g_close_passes         = 0;
 uint   g_close_reject_code    = 0;            // last rejection printed, for the log throttle
 ulong  g_close_reject_ms      = 0;
@@ -1290,6 +1344,11 @@ double g_ladder_closed_profit = 0.0;
 
 void ManageGridCycle()
   {
+   //--- The engine's closing flag follows the cycle (it only ever leaves
+   //--- CLOSING through CloseCycle, which clears it; this is the backstop).
+   if(g_grid.IsClosing() && !g_cycle.Is(CYCLE_CLOSING))
+      g_grid.EndBasketClose();
+
    //--- THE MONITOR runs first, in every state but CLOSING itself. A basket
    //--- at its target is closed whether or not anything may be placed —
    //--- in RECOVERY too.
@@ -1316,7 +1375,22 @@ void ManageGridCycle()
       case CYCLE_COOLDOWN:     CooldownCycle();   return;
       case CYCLE_RECOVERY:     RecoverCycle();    return;
       case CYCLE_PLACING:
-      case CYCLE_ARMED:        PlaceCycle();      return;
+      case CYCLE_ARMED:
+        {
+         ulong sent_before = g_ladder_last_send_ms;
+         PlaceCycle();
+         //--- Each ladder send waits for the broker, and a rung that filled
+         //--- meanwhile can carry the basket to its exit (PlaceLadder stops
+         //--- there). The close starts now, not on the next tick.
+         if(g_ladder_last_send_ms != sent_before && InpAllowTrading && !g_cycle.Is(CYCLE_CLOSING))
+           {
+            SBasket basket = g_grid.CombinedBasket();
+            string  why    = g_grid.BasketExitReason(g_strategy, basket);
+            if(why != "")
+               BeginCycleClose(why, basket);
+           }
+         return;
+        }
      }
   }
 
@@ -1658,19 +1732,33 @@ void PlaceCycle()
 //+------------------------------------------------------------------+
 void BeginCycleClose(const string why, const SBasket &basket)
   {
+   ulong started_us = GetMicrosecondCount();
+   int   resting    = g_grid.OurOrders();
+
+   //--- The protected closing state first: from here MayOpen refuses
+   //--- everything, whatever else runs.
+   g_grid.BeginBasketClose();
    g_cycle_close_reason    = why;
    g_cycle_close_attempt   = 0;
-   g_close_fast_retries    = 0;
-   g_close_passes          = 0;
    g_close_reject_code     = 0;
    g_close_reject_quiet    = 0;
    g_cycle_stuck_reported  = 0;
-   g_cycle_close_cancelled = 0;
-   g_grid.BeginBasketClose();
+
+   //--- Then the first pass, BEFORE anything is logged or persisted: the
+   //--- cycle record is flushed to disk, and the price does not wait for it.
+   int closes = 0, cancelled = 0;
+   int failed = g_grid.CloseBasketPass(why, closes, cancelled);
+   ulong sent_us = GetMicrosecondCount() - started_us;
+   g_close_passes          = 1;
+   g_cycle_close_cancelled = cancelled;
+
    PrintFormat("GoldGrid: ladder cycle %d closing — %s; %d position(s), %.2f lots, %d order(s) resting, "
-               "spread %I64d points", g_cycle.Number(), why, basket.count, basket.volume, g_grid.OurOrders(),
-               SymbolInfoInteger(_Symbol, SYMBOL_SPREAD));
+               "spread %I64d points; %d close(s) and %d cancel(s) sent in %I64u us%s",
+               g_cycle.Number(), why, basket.count, basket.volume, resting,
+               SymbolInfoInteger(_Symbol, SYMBOL_SPREAD), closes, cancelled, sent_us,
+               failed > 0 ? StringFormat(", %d close(s) refused at the call — retrying", failed) : "");
    g_cycle.Set(CYCLE_CLOSING, why);
+   SyncTimer();
   }
 
 //--- One pass of the close, paced so a broker that keeps rejecting is not
@@ -1685,23 +1773,31 @@ void CloseCycle()
          NoteGridGate("closing, but AllowTrading is off — nothing is sent");
          return;
         }
-      if(NowMs() - g_cycle_close_attempt < CLOSE_RETRY_PACE_MS)
-         return;
-      g_cycle_close_attempt = NowMs();
-
+      //--- Every event runs a pass; it sends only the closes and cancels
+      //--- that are due (none still executing), so this is cheap when there
+      //--- is nothing to send. A pass after a restart that found the record
+      //--- CLOSING also counts its cancels as the close's.
       int closes = 0, cancelled = 0;
       int failed = g_grid.CloseBasketPass(g_cycle_close_reason, closes, cancelled);
-      g_close_passes++;
-      if(g_close_passes == 1)
-         g_cycle_close_cancelled = cancelled;   // a retry's cancels are mostly repeats
-      if(closes + cancelled > 0)
-         PrintFormat("GoldGrid: close pass %d — %d close(s) and %d cancel(s) sent together", g_close_passes, closes,
-                     cancelled);
-      if(failed > 0)
-         PrintFormat("GoldGrid: %d close(s) could not be sent — retrying", failed);
+      if(closes + cancelled + failed > 0)
+        {
+         g_close_passes++;
+         if(g_close_passes == 1)
+            g_cycle_close_cancelled = cancelled;
+         PrintFormat("GoldGrid: close pass %d — %d close(s) and %d cancel(s) sent together%s", g_close_passes, closes,
+                     cancelled, failed > 0 ? StringFormat(", %d refused at the call — retrying", failed) : "");
+        }
       ReportIfStuck("the close has not completed");
       return;
      }
+
+   //--- A ladder order sent just before the close began may not be on the
+   //--- terminal's order list yet. Flat is not believed until any such send
+   //--- has had time to show up — and be cancelled by the pass above. (The
+   //--- tester's lists update synchronously; waiting there would only shift
+   //--- every later cycle by up to 2 s.)
+   if(!IsTester() && NowMs() - g_ladder_last_send_ms < LADDER_SEND_SETTLE_MS)
+      return;
 
    if(!g_grid.BasketConfirmedFlat())
      {
@@ -1731,6 +1827,7 @@ void CloseCycle()
          g_cycle.Begin();
       g_cycle.RestartPause(g_strategy.grid_cycle_pause_seconds);
      }
+   g_grid.EndBasketClose();
    g_cycle.Set(CYCLE_COOLDOWN, StringFormat("confirmed flat; pausing %d s", g_strategy.grid_cycle_pause_seconds));
   }
 
@@ -1754,12 +1851,17 @@ void CooldownCycle()
    //--- (a leftover, a duplicate request that landed late, a stray with our
    //--- magic) would be an entry nobody decided on, and it would fill while
    //--- the next ladder is being measured.
-   if(InpAllowTrading && g_grid.OurOrders() > 0 && NowMs() - g_cycle_close_attempt >= CLOSE_RETRY_PACE_MS)
+   //--- Likewise a position of the closed cycle: a rung whose fill crossed
+   //--- its cancel. Closed on the fill itself (OnTradeTransaction); this
+   //--- sweep catches one whose close was refused, or that a restart found.
+   if(InpAllowTrading && (g_grid.OurOrders() > 0 || g_grid.TotalPositions() > 0) &&
+      NowMs() - g_cycle_close_attempt >= CLOSE_RETRY_PACE_MS)
      {
       g_cycle_close_attempt = NowMs();
-      int withdrawn = g_grid.DeleteAllOrders(true);
+      int withdrawn = g_grid.OurOrders() > 0 ? g_grid.DeleteAllOrders(true) : 0;
       if(withdrawn > 0)
          PrintFormat("GoldGrid: withdrawing %d order(s) of ours that appeared during the pause", withdrawn);
+      g_grid.CloseStaleRungs(g_strategy.id, g_cycle.Number());
      }
 
    if(g_cycle.PauseRemaining(g_strategy.grid_cycle_pause_seconds) > 0)
@@ -1880,29 +1982,26 @@ bool GateNoteApplies()
           g_ladder_gate_cycle == g_cycle.Number();
   }
 
-//--- A close or cancel of the basket close that the broker refused. A close
-//--- refused outright (a requote, off quotes, a price that moved) leaves a
-//--- position open while the price moves, so the next close pass is brought
-//--- forward to 500 ms from now instead of the usual 2 s. "Position already
-//--- closed" is not a failure: a retry pass can reach a position whose first
-//--- close was still executing.
-//---
-//--- Only a PRICE rejection (requote, price changed, off quotes) earns the
-//--- early retry, at most CLOSE_FAST_RETRIES_MAX times per close: those
-//--- clear on the next quote. Anything else (no money, dealer reject, too
-//--- many requests, market closed) keeps the 2 s pace, so a broker that keeps
-//--- refusing is not hammered — "too many requests" in particular would only
-//--- feed itself. The log line is throttled: the first of each kind at once,
-//--- then at most one every 5 s with a count of those not printed.
+//--- The broker's answer to a close or cancel of the basket close. The
+//--- engine decides from it when that ticket is sent again (see
+//--- SCloseRequest in Grid.mqh): a refusal the next quote can clear
+//--- (requote, price moved, frozen, timeout) on the next pass, anything else
+//--- (no money, too many requests, market closed) after a second, so a
+//--- broker that keeps refusing is not hammered. "Position already closed"
+//--- is not a failure: a resend can reach a position whose first close was
+//--- still executing. The log line is throttled: the first of each kind at
+//--- once, then at most one every 5 s with a count of those not printed.
 void NoteCloseRejection(const MqlTradeRequest &request, const MqlTradeResult &result)
   {
-   uint code = result.retcode;
+   uint code   = result.retcode;
+   bool cancel = request.action == TRADE_ACTION_REMOVE;
+   g_grid.NoteCloseOutcome(cancel ? request.order : request.position, cancel, code);
+
    if(code == TRADE_RETCODE_DONE || code == TRADE_RETCODE_DONE_PARTIAL || code == TRADE_RETCODE_PLACED ||
       code == TRADE_RETCODE_POSITION_CLOSED)
       return;
 
-   bool  cancel = request.action == TRADE_ACTION_REMOVE;
-   ulong now    = NowMs();
+   ulong now = NowMs();
    if(code != g_close_reject_code || now - g_close_reject_ms >= 5000)
      {
       PrintFormat("GoldGrid: %s #%I64u REJECTED by the broker, retcode %u%s%s",
@@ -1915,19 +2014,6 @@ void NoteCloseRejection(const MqlTradeRequest &request, const MqlTradeResult &re
      }
    else
       g_close_reject_quiet++;
-
-   if(cancel)
-      return;
-   bool price_moved = code == TRADE_RETCODE_REQUOTE || code == TRADE_RETCODE_PRICE_CHANGED ||
-                      code == TRADE_RETCODE_PRICE_OFF;
-   if(!price_moved || g_close_fast_retries >= CLOSE_FAST_RETRIES_MAX)
-      return;
-   ulong pull = CLOSE_RETRY_PACE_MS - CLOSE_RETRY_AFTER_REJECTION_MS;
-   if(now > pull && now - g_cycle_close_attempt < pull)
-     {
-      g_cycle_close_attempt = now - pull;
-      g_close_fast_retries++;
-     }
   }
 
 //+------------------------------------------------------------------+
@@ -2720,11 +2806,17 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                                    (ulong)HistoryDealGetInteger(trans.deal, DEAL_ORDER));
          g_grid.NoteFillDeal(g_strategy.id, trans.deal);
          //--- A rung that filled while the basket is being closed (its cancel
-         //--- arrived too late) is closed at once, not on the next 2 s pass.
+         //--- arrived too late) is closed at once, not on the next pass.
          if(g_cycle.Is(CYCLE_CLOSING) && InpAllowTrading)
+            g_grid.CloseFillNow((ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID), g_cycle_close_reason);
+         //--- One of the closed cycle's rungs, filling after the basket was
+         //--- confirmed flat: its cancel crossed the fill. The cycle's target
+         //--- is already banked; this is an entry nobody decided on.
+         else if(g_cycle.Is(CYCLE_COOLDOWN) && InpAllowTrading)
            {
-            g_grid.NoteOpenPositions();
-            g_grid.ClosePosition((ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID), g_cycle_close_reason, true);
+            int c = CycleFromComment(comment);
+            if(c > 0 && c < g_cycle.Number() && StrategyIdFromComment(comment) == g_strategy.id)
+               g_grid.CloseStaleRungs(g_strategy.id, g_cycle.Number());
            }
          ManageBaskets();
          return;
